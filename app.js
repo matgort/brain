@@ -3236,7 +3236,7 @@ function render() {
 }
 
 function syncPageTitle() {
-  document.title = state.title ? `${state.title} — Brainstorm Canvas` : "Brainstorm Canvas";
+  document.title = state.title ? `${state.title} — Brain Map` : "Brain Map";
   dom.titleButton.textContent = state.title || "Title";
   dom.titleButton.title = state.title ? `Edit title: ${state.title}` : "Add page title";
 }

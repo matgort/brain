@@ -1,4 +1,4 @@
-# Brainstorm Canvas
+# Brain Map
 
 This is a self-contained local web app for the infinite idea canvas.
 
@@ -20,6 +20,7 @@ Then open `http://127.0.0.1:4173`.
 ## How it works
 
 - Drag on empty canvas to create a new note; click inside it to type.
+- Notes keep their drawn width and grow downward only when text overflows. Press Shift + Enter to fit a note's height exactly to its writing. Linked notes grow independently.
 - On mobile, tap `New Card` and drag a rectangle on empty canvas. Otherwise, a one-finger swipe on empty canvas pans; pinch with two fingers to zoom.
 - On mobile, `Swatch` toggles a horizontal row of square color choices below the controls.
 - Hold Space and drag to pan, or drag any card edge to move a card.
