@@ -129,6 +129,7 @@ const uiState = {
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
   labelModalPrimed: false,
+  labelModalOpenedAt: 0,
   mobileNewCardMode: false,
   colorTargetPending: false,
   paletteEditingCardId: null
@@ -674,12 +675,15 @@ function handlePointerDown(event) {
   }
 
   if (uiState.currentTool === "label") {
-    if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
+    const labelTargetCard = cardElement || (
+      isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY) : null
+    );
+    if (labelTargetCard && !state.cards[labelTargetCard.dataset.id]?.isLabel) {
       event.preventDefault();
-      openLabelModal(cardElement.dataset.id);
+      openLabelModal(labelTargetCard.dataset.id);
       return;
     }
-    if (!cardElement) {
+    if (!labelTargetCard) {
       setSelectedCard(null);
       requestRender();
       return;
@@ -1275,6 +1279,7 @@ function openLabelModal(cardId) {
   closeDeleteModal({ skipRender: true });
   uiState.pendingLabelRootId = rootId;
   uiState.labelModalPrimed = true;
+  uiState.labelModalOpenedAt = Date.now();
   applyLabelModalTheme(rootId);
   dom.labelInput.value = "";
   dom.labelModal.hidden = false;
@@ -1288,6 +1293,7 @@ function openLabelModal(cardId) {
 function closeLabelModal() {
   uiState.pendingLabelRootId = null;
   uiState.labelModalPrimed = false;
+  uiState.labelModalOpenedAt = 0;
   dom.labelModal.hidden = true;
   dom.labelInput.value = "";
   clearLabelModalTheme();
@@ -1296,7 +1302,7 @@ function closeLabelModal() {
 
 function handleLabelModalClick(event) {
   if (event.target === dom.labelModal) {
-    if (uiState.labelModalPrimed) {
+    if (uiState.labelModalPrimed || Date.now() - uiState.labelModalOpenedAt < 500) {
       return;
     }
     closeLabelModal();
@@ -2206,11 +2212,13 @@ function startBrush(event, cardId) {
   interaction.mode = "brush";
   interaction.primaryPointerId = event.pointerId;
   capturePointer(event.pointerId);
-  const start = screenToWorld({ x: event.clientX, y: event.clientY });
+  const sourceId = getRootId(cardId);
+  const start = cardCenter(getWorldRect(sourceId));
+  const pointer = screenToWorld({ x: event.clientX, y: event.clientY });
   interaction.brush = {
-    sourceId: getRootId(cardId),
+    sourceId,
     points: [start],
-    currentPoint: start
+    currentPoint: pointer
   };
   setSelectedCard(cardId);
   requestRender();
