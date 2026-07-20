@@ -84,6 +84,7 @@ const dom = {
   infoModal: document.getElementById("infoModal"),
   infoCloseButton: document.getElementById("infoCloseButton"),
   centerView: document.getElementById("centerView"),
+  fullscreenButton: document.getElementById("fullscreenButton"),
   saveModal: document.getElementById("saveModal"),
   saveImageButton: document.getElementById("saveImageButton"),
   saveTextButton: document.getElementById("saveTextButton"),
@@ -158,6 +159,7 @@ function boot() {
   renderPalette();
   bindEvents();
   applyToolState();
+  syncFullscreenButton();
   syncPaletteVisibility();
   requestRender();
 }
@@ -180,6 +182,8 @@ function bindEvents() {
   dom.infoCloseButton.addEventListener("click", closeInfoModal);
   dom.infoModal.addEventListener("click", handleInfoModalClick);
   dom.centerView.addEventListener("click", centerBoardView);
+  dom.fullscreenButton.addEventListener("click", toggleFullscreen);
+  document.addEventListener("fullscreenchange", syncFullscreenButton);
   dom.resetView.addEventListener("click", openResetModal);
   dom.titleButton.addEventListener("click", openTitleModal);
   dom.titleForm.addEventListener("submit", handleTitleSubmit);
@@ -2630,6 +2634,28 @@ function centerBoardView() {
   state.camera.x = focusX - (bounds.x + bounds.w / 2) * nextScale;
   state.camera.y = focusY - (bounds.y + bounds.h / 2) * nextScale;
   scheduleSave();
+  requestRender();
+}
+
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+    } else if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen();
+    } else {
+      showToast("Fullscreen is not available in this browser");
+    }
+  } catch (error) {
+    console.warn("Could not change fullscreen mode.", error);
+    showToast("Fullscreen could not be opened");
+  }
+}
+
+function syncFullscreenButton() {
+  const active = !!document.fullscreenElement;
+  dom.fullscreenButton.textContent = active ? "Exit full screen" : "Fullscreen";
+  dom.fullscreenButton.setAttribute("aria-pressed", active ? "true" : "false");
   requestRender();
 }
 
