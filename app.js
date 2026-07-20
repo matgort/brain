@@ -264,7 +264,11 @@ function normalizeStateSnapshot(parsed) {
     const isLabel = !!card.isLabel;
     const widthCap = isLabel
       ? MAX_LABEL_CARD_WIDTH
-      : clamp(toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH), MAX_NOTE_CARD_WIDTH, MAX_RESIZED_NOTE_WIDTH);
+      : Math.max(
+          MAX_NOTE_CARD_WIDTH,
+          toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH),
+          toNumber(card.w, MAX_NOTE_CARD_WIDTH)
+        );
     const fontScale = isLabel
       ? 1
       : clamp(toNumber(card.fontScale, 1), MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
@@ -276,11 +280,9 @@ function normalizeStateSnapshot(parsed) {
       parentId: card.parentId ? String(card.parentId) : null,
       x: toNumber(card.x, 0),
       y: toNumber(card.y, 0),
-      w: clamp(
-        toNumber(card.w, fitMinWidth),
-        fitMinWidth,
-        isLabel ? MAX_LABEL_CARD_WIDTH : widthCap
-      ),
+      w: isLabel
+        ? clamp(toNumber(card.w, fitMinWidth), fitMinWidth, MAX_LABEL_CARD_WIDTH)
+        : Math.max(fitMinWidth, toNumber(card.w, fitMinWidth)),
       h: Math.max(fitMinHeight, toNumber(card.h, fitMinHeight)),
       color: isHex(card.color) ? card.color : PALETTE[0].fill,
       isLabel,
@@ -324,6 +326,15 @@ function normalizeStateSnapshot(parsed) {
                   .map((point) =>
                     point && isFiniteNumber(point.x) && isFiniteNumber(point.y)
                       ? { x: point.x, y: point.y }
+                      : null
+                  )
+                  .filter(Boolean)
+              : [],
+            shape: Array.isArray(item.shape)
+              ? item.shape
+                  .map((point) =>
+                    point && isFiniteNumber(point.u) && isFiniteNumber(point.v)
+                      ? { u: point.u, v: point.v }
                       : null
                   )
                   .filter(Boolean)
@@ -542,6 +553,19 @@ function ensureCardBelowMobileControls(cardId) {
   const usableTop = getMobileCanvasTop();
   if (screenTop < usableTop) {
     moveCardBy(cardId, 0, (usableTop - screenTop) / state.camera.scale);
+  }
+}
+
+function ensureCardSetBelowMobileControls(cardIds) {
+  const ids = uniqueExistingCardIds(cardIds);
+  if (!isMobileLayout() || ids.length === 0) {
+    return;
+  }
+  const bounds = getBoundsForCardIds(ids);
+  const screenTop = worldToScreen({ x: bounds.x, y: bounds.y }).y;
+  const usableTop = getMobileCanvasTop();
+  if (screenTop < usableTop) {
+    moveCardSetBy(ids, 0, (usableTop - screenTop) / state.camera.scale);
   }
 }
 
@@ -1226,7 +1250,15 @@ function getDragTargetCardIds(cardId) {
   }
 
   if (card.isLabel) {
-    return uniqueExistingCardIds([cardId, ...getLabelMemberRootIds(cardId)]);
+    const memberRootIds = getLabelMemberRootIds(cardId);
+    const relatedLabelIds = Object.values(state.cards)
+      .filter((candidate) => {
+        return candidate.isLabel && getLabelMemberRootIds(candidate.id).some((rootId) => {
+          return memberRootIds.includes(rootId);
+        });
+      })
+      .map((candidate) => candidate.id);
+    return uniqueExistingCardIds([...relatedLabelIds, ...memberRootIds]);
   }
   return [cardId];
 }
@@ -1255,22 +1287,30 @@ function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }, movingCardIds
   let safety = 0;
   while (safety < 80) {
     safety += 1;
-    const currentRect = getBoundsForCardIds(movingIds);
-    const obstacle = Object.values(state.cards).find((candidate) => {
-      if (
-        movingIdSet.has(candidate.id) ||
-        isHiddenByCollapsedAncestor(candidate.id) ||
-        isDescendant(candidate.id, cardId) ||
-        isDescendant(cardId, candidate.id)
-      ) {
-        return false;
+    let collision = null;
+    for (const movingId of movingIds) {
+      const movingRect = getLayoutBounds(movingId);
+      const obstacle = Object.values(state.cards).find((candidate) => {
+        if (
+          movingIdSet.has(candidate.id) ||
+          isHiddenByCollapsedAncestor(candidate.id) ||
+          isDescendant(candidate.id, movingId) ||
+          isDescendant(movingId, candidate.id)
+        ) {
+          return false;
+        }
+        return rectsOverlapWithGap(movingRect, getLayoutBounds(candidate.id), CARD_GAP);
+      });
+      if (obstacle) {
+        collision = { currentRect: movingRect, obstacle };
+        break;
       }
-      return rectsOverlapWithGap(currentRect, getLayoutBounds(candidate.id), CARD_GAP);
-    });
-    if (!obstacle) {
+    }
+    if (!collision) {
       return;
     }
 
+    const { currentRect, obstacle } = collision;
     const obstacleRect = getLayoutBounds(obstacle.id);
     const shifts = {
       left: obstacleRect.x - CARD_GAP - (currentRect.x + currentRect.w),
@@ -1725,7 +1765,11 @@ function getNoteWidthCap(card) {
   if (!card || card.isLabel) {
     return MAX_LABEL_CARD_WIDTH;
   }
-  return clamp(toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH), MAX_NOTE_CARD_WIDTH, MAX_RESIZED_NOTE_WIDTH);
+  return Math.max(
+    MAX_NOTE_CARD_WIDTH,
+    toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH),
+    toNumber(card.w, MAX_NOTE_CARD_WIDTH)
+  );
 }
 
 function getCardFitMinWidth(card) {
@@ -2174,7 +2218,14 @@ function updateCardDrag(event) {
   const deltaY = nextWorldY - currentRect.y;
   moveCardSetBy(interaction.drag.targetCardIds, deltaX, deltaY);
   interaction.drag.pointer = { x: event.clientX, y: event.clientY };
-  if (interaction.drag.kind === "move" && !isMobileLayout()) {
+  if (interaction.drag.kind === "move" && interaction.drag.targetCardIds.length > 1) {
+    resolveMobileCardOverlap(
+      interaction.drag.cardId,
+      { x: deltaX, y: deltaY },
+      interaction.drag.targetCardIds
+    );
+    ensureCardSetBelowMobileControls(interaction.drag.targetCardIds);
+  } else if (interaction.drag.kind === "move" && !isMobileLayout()) {
     resolveCardSetPlacement(interaction.drag.targetCardIds, {
       x: deltaX,
       y: deltaY
@@ -2185,7 +2236,7 @@ function updateCardDrag(event) {
       { x: deltaX, y: deltaY },
       interaction.drag.targetCardIds
     );
-    ensureCardBelowMobileControls(interaction.drag.cardId);
+    ensureCardSetBelowMobileControls(interaction.drag.targetCardIds);
   }
   requestRender();
 }
@@ -2211,11 +2262,14 @@ function finishCardDrag() {
     return;
   }
 
-  if (!isMobileLayout()) {
+  if (drag.targetCardIds.length > 1) {
+    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 }, drag.targetCardIds);
+    ensureCardSetBelowMobileControls(drag.targetCardIds);
+  } else if (!isMobileLayout()) {
     resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
   } else {
     resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 }, drag.targetCardIds);
-    ensureCardBelowMobileControls(drag.cardId);
+    ensureCardSetBelowMobileControls(drag.targetCardIds);
   }
   bringCardsForward(drag.targetCardIds);
   scheduleSave();
@@ -2416,7 +2470,7 @@ function updateBrush(event) {
   const point = screenToWorld(pointerScreen);
   interaction.brush.currentPoint = point;
   const last = interaction.brush.points[interaction.brush.points.length - 1];
-  if (!last || distanceBetween(last, point) > 24 / state.camera.scale) {
+  if (!last || distanceBetween(last, point) > 8 / state.camera.scale) {
     interaction.brush.points.push(point);
   } else if (interaction.brush.points.length === 1) {
     interaction.brush.points.push(point);
@@ -2459,6 +2513,14 @@ function finishBrush(event) {
   });
   if (existingConnectionIndex >= 0) {
     state.connections.splice(existingConnectionIndex, 1);
+    let unlinkedColor = nextCardColor();
+    const previousColor = state.cards[targetId]?.color;
+    let attempts = 0;
+    while (unlinkedColor === previousColor && attempts < DISPLAY_PALETTE.length) {
+      unlinkedColor = nextCardColor();
+      attempts += 1;
+    }
+    applyColorToSubtree(targetId, unlinkedColor);
     scheduleSave();
     requestRender();
     showToast("Cards unlinked");
@@ -2469,9 +2531,6 @@ function finishBrush(event) {
   applyColorToSubtree(brush.sourceId, sharedColor);
   applyColorToSubtree(targetId, sharedColor);
   upsertConnection(brush.sourceId, targetId, simplifyPathPoints(brush.points), sharedColor);
-  if (!isMobileLayout()) {
-    pullRootsTogether(brush.sourceId, targetId);
-  }
   scheduleSave();
   requestRender();
 }
@@ -2479,6 +2538,7 @@ function finishBrush(event) {
 function upsertConnection(fromId, toId, points, color) {
   const pairKey = [fromId, toId].sort().join("::");
   const via = points.slice(1, -1);
+  const shape = encodeConnectionShape(fromId, toId, via);
   const existing = state.connections.find((connection) => {
     const currentKey = [connection.fromId, connection.toId].sort().join("::");
     return currentKey === pairKey;
@@ -2489,6 +2549,7 @@ function upsertConnection(fromId, toId, points, color) {
     existing.toId = toId;
     existing.color = color;
     existing.via = via;
+    existing.shape = shape;
     return;
   }
 
@@ -2497,8 +2558,35 @@ function upsertConnection(fromId, toId, points, color) {
     fromId,
     toId,
     color,
-    via
+    via,
+    shape
   });
+}
+
+function encodeConnectionShape(fromId, toId, points) {
+  const from = cardCenter(getWorldRect(fromId));
+  const to = cardCenter(getWorldRect(toId));
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const lengthSquared = Math.max(dx * dx + dy * dy, 1);
+  return points.map((point) => ({
+    u: ((point.x - from.x) * dx + (point.y - from.y) * dy) / lengthSquared,
+    v: ((point.x - from.x) * -dy + (point.y - from.y) * dx) / lengthSquared
+  }));
+}
+
+function decodeConnectionShape(connection, fromId, toId) {
+  if (!Array.isArray(connection.shape) || connection.shape.length === 0) {
+    return connection.via || [];
+  }
+  const from = cardCenter(getWorldRect(fromId));
+  const to = cardCenter(getWorldRect(toId));
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  return connection.shape.map((point) => ({
+    x: from.x + point.u * dx - point.v * dy,
+    y: from.y + point.u * dy + point.v * dx
+  }));
 }
 
 function getCardNearScreenPoint(clientX, clientY, excludedRootId = null, radius = 30) {
@@ -2614,7 +2702,7 @@ function createCard(rect) {
     parentId: null,
     x: rect.x,
     y: rect.y,
-    w: clamp(rect.w, MIN_CARD_WIDTH, MAX_NOTE_CARD_WIDTH),
+    w: Math.max(MIN_CARD_WIDTH, rect.w),
     h: rect.h,
     color,
     isLabel: false,
@@ -2681,11 +2769,12 @@ function setCardWorldRect(cardId, rect) {
   const parentRect = card.parentId ? getWorldRect(card.parentId) : { x: 0, y: 0 };
   card.x = rect.x - parentRect.x;
   card.y = rect.y - parentRect.y;
-  card.w = clamp(
-    rect.w,
-    MIN_CARD_WIDTH,
-    card.isLabel ? MAX_LABEL_CARD_WIDTH : getNoteWidthCap(card)
-  );
+  card.w = card.isLabel
+    ? clamp(rect.w, MIN_CARD_WIDTH, MAX_LABEL_CARD_WIDTH)
+    : Math.max(MIN_CARD_WIDTH, rect.w);
+  if (!card.isLabel) {
+    card.widthCap = Math.max(toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH), card.w);
+  }
   card.h = Math.max(MIN_CARD_HEIGHT, rect.h);
 }
 
@@ -2820,6 +2909,9 @@ function shiftConnectionPathsForMovedRoots(cardIds, deltaX, deltaY) {
   }
 
   state.connections.forEach((connection) => {
+    if (Array.isArray(connection.shape) && connection.shape.length > 0) {
+      return;
+    }
     if (!movedRootIds.has(connection.fromId) && !movedRootIds.has(connection.toId)) {
       return;
     }
@@ -3428,7 +3520,7 @@ function renderConnections() {
       const toRect = getWorldRect(toId);
       const points = [
         worldToScreen(cardCenter(fromRect)),
-        ...connection.via.map(worldToScreen),
+        ...decodeConnectionShape(connection, fromId, toId).map(worldToScreen),
         worldToScreen(cardCenter(toRect))
       ];
       const path = buildSmoothPath(points);
@@ -3577,7 +3669,7 @@ function getVisibleSceneData() {
         color: connection.color,
         points: [
           cardCenter(getWorldRect(fromId)),
-          ...connection.via.map((point) => ({ x: point.x, y: point.y })),
+          ...decodeConnectionShape(connection, fromId, toId).map((point) => ({ x: point.x, y: point.y })),
           cardCenter(getWorldRect(toId))
         ]
       };
@@ -3864,7 +3956,7 @@ function simplifyPathPoints(points) {
   }
 
   const simplified = [points[0]];
-  const stride = Math.max(1, Math.floor(points.length / 12));
+  const stride = Math.max(1, Math.floor(points.length / 48));
   for (let index = stride; index < points.length - 1; index += stride) {
     simplified.push(points[index]);
   }
