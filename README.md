@@ -25,7 +25,8 @@ Then open `http://127.0.0.1:4173`.
 - On mobile, `Swatch` toggles a horizontal row of square color choices below the controls.
 - Hold Space and drag to pan, or drag any card edge to move a card.
 - Choose a `Swatch`, then tap a note to recolor it or empty canvas to recolor the background. When a note is actively being edited, choosing a swatch recolors it immediately.
-- `Link` tool: draw from one stack to another to connect them and unify their color.
+- `Link` tool: draw from one stack to another to connect them and unify their color. Draw between the same directly connected notes again to unlink them.
+- Drag a group label to move the full group; drag an individual note to rearrange only that note.
 - `Label` tool: click a note to name its connected group.
 - `Text` opens a floating toolbar for editing, type size, bold, italic, underline, alignment, and restoring defaults.
 - Double-click a card to zoom in; use `Center` to frame the whole board.

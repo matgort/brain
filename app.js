@@ -766,7 +766,8 @@ function handlePointerDown(event) {
   if (cardElement) {
     if (!gripElement && isCollapsibleLabel(cardElement.dataset.id)) {
       event.preventDefault();
-      toggleLabelCollapse(cardElement.dataset.id);
+      setSelectedCard(cardElement.dataset.id);
+      startCardDrag(event, cardElement.dataset.id, "move", { tapToToggleLabel: true });
       return;
     }
     setSelectedCard(cardElement.dataset.id);
@@ -1227,25 +1228,7 @@ function getDragTargetCardIds(cardId) {
   if (card.isLabel) {
     return uniqueExistingCardIds([cardId, ...getLabelMemberRootIds(cardId)]);
   }
-
-  const rootId = getRootId(cardId);
-  const labelIds = getLabelIdsForRoot(rootId);
-  if (labelIds.length === 0) {
-    return [cardId];
-  }
-
-  const memberRootIds = new Set();
-  labelIds.forEach((labelId) => {
-    getLabelMemberRootIds(labelId).forEach((memberRootId) => {
-      memberRootIds.add(memberRootId);
-    });
-  });
-
-  if (!memberRootIds.has(rootId)) {
-    return [cardId];
-  }
-
-  return uniqueExistingCardIds([...labelIds, ...memberRootIds]);
+  return [cardId];
 }
 
 function moveCardSetBy(cardIds, deltaX, deltaY) {
@@ -1261,19 +1244,21 @@ function resolveCardSetPlacement(cardIds, motion = { x: 0, y: 0 }) {
   });
 }
 
-function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }) {
+function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }, movingCardIds = [cardId]) {
   const card = state.cards[cardId];
   if (!card) {
     return;
   }
 
+  const movingIds = uniqueExistingCardIds(movingCardIds);
+  const movingIdSet = new Set(movingIds);
   let safety = 0;
   while (safety < 80) {
     safety += 1;
-    const currentRect = getLayoutBounds(cardId);
+    const currentRect = getBoundsForCardIds(movingIds);
     const obstacle = Object.values(state.cards).find((candidate) => {
       if (
-        candidate.id === cardId ||
+        movingIdSet.has(candidate.id) ||
         isHiddenByCollapsedAncestor(candidate.id) ||
         isDescendant(candidate.id, cardId) ||
         isDescendant(cardId, candidate.id)
@@ -1315,7 +1300,7 @@ function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }) {
         { x: 0, y: shifts.down }
       ].sort((a, b) => Math.hypot(a.x, a.y) - Math.hypot(b.x, b.y))[0];
     }
-    moveCardBy(cardId, shift.x, shift.y);
+    moveCardSetBy(movingIds, shift.x, shift.y);
   }
 }
 
@@ -2159,7 +2144,8 @@ function startCardDrag(event, cardId, kind = "move", options = {}) {
     pointer: { x: event.clientX, y: event.clientY },
     startScreen: { x: event.clientX, y: event.clientY },
     moved: false,
-    tapToEdit: !!options.tapToEdit
+    tapToEdit: !!options.tapToEdit,
+    tapToToggleLabel: !!options.tapToToggleLabel
   };
   bringCardsForward(targetCardIds);
   requestRender();
@@ -2194,7 +2180,11 @@ function updateCardDrag(event) {
       y: deltaY
     });
   } else if (interaction.drag.kind === "move") {
-    resolveMobileCardOverlap(interaction.drag.cardId, { x: deltaX, y: deltaY });
+    resolveMobileCardOverlap(
+      interaction.drag.cardId,
+      { x: deltaX, y: deltaY },
+      interaction.drag.targetCardIds
+    );
     ensureCardBelowMobileControls(interaction.drag.cardId);
   }
   requestRender();
@@ -2216,11 +2206,15 @@ function finishCardDrag() {
     requestRender();
     return;
   }
+  if (!drag.moved && drag.tapToToggleLabel) {
+    toggleLabelCollapse(drag.cardId);
+    return;
+  }
 
   if (!isMobileLayout()) {
     resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
   } else {
-    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 });
+    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 }, drag.targetCardIds);
     ensureCardBelowMobileControls(drag.cardId);
   }
   bringCardsForward(drag.targetCardIds);
@@ -2456,6 +2450,18 @@ function finishBrush(event) {
     state.cards[targetId]?.isLabel
   ) {
     requestRender();
+    return;
+  }
+
+  const existingConnectionIndex = state.connections.findIndex((connection) => {
+    return [connection.fromId, connection.toId].sort().join("::") ===
+      [brush.sourceId, targetId].sort().join("::");
+  });
+  if (existingConnectionIndex >= 0) {
+    state.connections.splice(existingConnectionIndex, 1);
+    scheduleSave();
+    requestRender();
+    showToast("Cards unlinked");
     return;
   }
 

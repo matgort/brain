@@ -473,7 +473,6 @@ body[data-tool="card"] .card-body,
 body[data-tool="label"] .card-body,
 body[data-tool="size"] .card-body,
 body[data-tool="delete"] .card-body,
-body[data-tool="bucket"] .card-body,
 body[data-tool="brush"] .card-body {
   pointer-events: none;
 }
@@ -489,10 +488,6 @@ body[data-tool="default"] .viewport {
 
 body[data-tool="default"] .note-card .card-body {
   cursor: text;
-}
-
-body[data-tool="bucket"] .viewport {
-  cursor: cell;
 }
 
 body[data-tool="brush"] .viewport {
@@ -564,7 +559,7 @@ body.is-space-panning .viewport {
 }
 
 .modal-card--info {
-  width: min(760px, calc(100vw - 48px));
+  width: min(444px, calc(100vw - 48px));
   padding: 26px 28px 24px;
 }
 
@@ -583,8 +578,8 @@ body.is-space-panning .viewport {
 
 .info-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 22px 28px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
 }
 
 .info-section h3 {
@@ -780,7 +775,7 @@ body.is-space-panning .viewport {
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 760px), (pointer: coarse) {
   body::before {
     left: 14px;
   }
@@ -820,9 +815,22 @@ body.is-space-panning .viewport {
   }
 
   .palette {
-    left: 4px;
-    top: 56px;
+    left: 8px;
+    right: 8px;
+    top: 62px;
+    width: auto;
+    max-width: none;
+    flex-direction: row;
     gap: 5px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 2px 6px;
+    touch-action: pan-x;
+    scrollbar-width: thin;
+  }
+
+  .palette-swatch {
+    flex: 0 0 auto;
   }
 
   .tool-hint {
@@ -834,6 +842,10 @@ body.is-space-panning .viewport {
     top: 62px;
     max-width: calc(100vw - 16px);
     overflow-x: auto;
+  }
+
+  body.is-palette-open .text-toolbar {
+    top: 108px;
   }
 
   .text-toolbar-button {
@@ -867,26 +879,6 @@ body.is-space-panning .viewport {
   .toast {
     bottom: 12px;
     font-size: 1rem;
-  }
-}
-
-@media (max-width: 760px) and (orientation: portrait) {
-  .palette {
-    left: 8px;
-    right: 8px;
-    top: 62px;
-    width: auto;
-    max-width: none;
-    flex-direction: row;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding: 2px 2px 6px;
-    touch-action: pan-x;
-    scrollbar-width: thin;
-  }
-
-  .palette-swatch {
-    flex: 0 0 auto;
   }
 }
 
