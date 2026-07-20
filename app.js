@@ -751,6 +751,18 @@ function handlePointerDown(event) {
     return;
   }
 
+  if (
+    isMobileLayout() &&
+    cardElement &&
+    !gripElement &&
+    !state.cards[cardElement.dataset.id]?.isLabel
+  ) {
+    event.preventDefault();
+    setSelectedCard(cardElement.dataset.id);
+    startCardDrag(event, cardElement.dataset.id, "move", { tapToEdit: !!bodyElement });
+    return;
+  }
+
   if (cardElement) {
     if (!gripElement && isCollapsibleLabel(cardElement.dataset.id)) {
       event.preventDefault();
@@ -1249,6 +1261,64 @@ function resolveCardSetPlacement(cardIds, motion = { x: 0, y: 0 }) {
   });
 }
 
+function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }) {
+  const card = state.cards[cardId];
+  if (!card) {
+    return;
+  }
+
+  let safety = 0;
+  while (safety < 80) {
+    safety += 1;
+    const currentRect = getLayoutBounds(cardId);
+    const obstacle = Object.values(state.cards).find((candidate) => {
+      if (
+        candidate.id === cardId ||
+        isHiddenByCollapsedAncestor(candidate.id) ||
+        isDescendant(candidate.id, cardId) ||
+        isDescendant(cardId, candidate.id)
+      ) {
+        return false;
+      }
+      return rectsOverlapWithGap(currentRect, getLayoutBounds(candidate.id), CARD_GAP);
+    });
+    if (!obstacle) {
+      return;
+    }
+
+    const obstacleRect = getLayoutBounds(obstacle.id);
+    const shifts = {
+      left: obstacleRect.x - CARD_GAP - (currentRect.x + currentRect.w),
+      right: obstacleRect.x + obstacleRect.w + CARD_GAP - currentRect.x,
+      up: obstacleRect.y - CARD_GAP - (currentRect.y + currentRect.h),
+      down: obstacleRect.y + obstacleRect.h + CARD_GAP - currentRect.y
+    };
+    const currentCenter = cardCenter(currentRect);
+    const obstacleCenter = cardCenter(obstacleRect);
+
+    let shift;
+    if (Math.abs(motion.x) > Math.abs(motion.y) && motion.x !== 0) {
+      const moveLeft = currentCenter.x < obstacleCenter.x || (
+        currentCenter.x === obstacleCenter.x && motion.x < 0
+      );
+      shift = moveLeft ? { x: shifts.left, y: 0 } : { x: shifts.right, y: 0 };
+    } else if (motion.y !== 0) {
+      const moveUp = currentCenter.y < obstacleCenter.y || (
+        currentCenter.y === obstacleCenter.y && motion.y < 0
+      );
+      shift = moveUp ? { x: 0, y: shifts.up } : { x: 0, y: shifts.down };
+    } else {
+      shift = [
+        { x: shifts.left, y: 0 },
+        { x: shifts.right, y: 0 },
+        { x: 0, y: shifts.up },
+        { x: 0, y: shifts.down }
+      ].sort((a, b) => Math.hypot(a.x, a.y) - Math.hypot(b.x, b.y))[0];
+    }
+    moveCardBy(cardId, shift.x, shift.y);
+  }
+}
+
 function bringCardsForward(cardIds) {
   uniqueExistingCardIds(cardIds)
     .sort((leftId, rightId) => state.cards[leftId].order - state.cards[rightId].order)
@@ -1373,8 +1443,20 @@ function handleLabelSubmit(event) {
   setSelectedCard(labelId);
   bringCardForward(labelId);
   setTool("default");
+  centerLabelGroupView(labelId);
   scheduleSave();
   requestRender();
+}
+
+function centerLabelGroupView(labelId) {
+  const label = state.cards[labelId];
+  if (!label?.isLabel) {
+    return;
+  }
+  const memberRootIds = getLabelMemberRootIds(labelId);
+  const bounds = getBoundsForCardIds([labelId, ...memberRootIds]);
+  dom.viewport.focus({ preventScroll: true });
+  centerBoundsInCanvas(bounds);
 }
 
 function createLabelCard(title, seedRootId) {
@@ -1415,6 +1497,8 @@ function createLabelCard(title, seedRootId) {
   };
 
   if (isMobileLayout()) {
+    ensureCardBelowMobileControls(id);
+    resolveMobileCardOverlap(id, { x: 0, y: 1 });
     ensureCardBelowMobileControls(id);
   } else {
     resolveCardPlacement(id, { x: 0, y: -1 });
@@ -1719,6 +1803,7 @@ function growCardHeightToContent(cardId, body) {
   }
 
   card.h = requiredHeight;
+  resolveSiblingCollisions(cardId, { x: 0, y: 1 });
   requestRender();
   return true;
 }
@@ -1981,7 +2066,22 @@ function finishDraft() {
   }
 
   const cardId = createCard(rect);
+  if (isMobileLayout()) {
+    resolveMobileCardOverlap(cardId, {
+      x: draft.currentWorld.x - draft.startWorld.x,
+      y: draft.currentWorld.y - draft.startWorld.y
+    });
+  } else {
+    resolveCardPlacement(cardId, {
+      x: draft.currentWorld.x - draft.startWorld.x,
+      y: draft.currentWorld.y - draft.startWorld.y
+    });
+  }
   ensureCardBelowMobileControls(cardId);
+  if (isMobileLayout()) {
+    resolveMobileCardOverlap(cardId, { x: 0, y: 1 });
+    ensureCardBelowMobileControls(cardId);
+  }
   setSelectedCard(cardId);
   uiState.pendingFocusCardId = cardId;
   if (isMobileLayout()) {
@@ -2034,7 +2134,7 @@ function finishPan() {
   requestRender();
 }
 
-function startCardDrag(event, cardId, kind = "move") {
+function startCardDrag(event, cardId, kind = "move", options = {}) {
   const card = state.cards[cardId];
   if (!card) {
     return;
@@ -2044,7 +2144,11 @@ function startCardDrag(event, cardId, kind = "move") {
   capturePointer(event.pointerId);
   const worldPoint = screenToWorld({ x: event.clientX, y: event.clientY });
   const rect = getWorldRect(cardId);
-  const targetCardIds = kind === "move" ? getDragTargetCardIds(cardId) : [cardId];
+  const targetCardIds = kind === "move"
+    ? isMobileLayout() && !card.isLabel
+      ? [cardId]
+      : getDragTargetCardIds(cardId)
+    : [cardId];
   interaction.drag = {
     cardId,
     kind,
@@ -2052,7 +2156,10 @@ function startCardDrag(event, cardId, kind = "move") {
     originalParentId: card.parentId,
     offsetX: worldPoint.x - rect.x,
     offsetY: worldPoint.y - rect.y,
-    pointer: { x: event.clientX, y: event.clientY }
+    pointer: { x: event.clientX, y: event.clientY },
+    startScreen: { x: event.clientX, y: event.clientY },
+    moved: false,
+    tapToEdit: !!options.tapToEdit
   };
   bringCardsForward(targetCardIds);
   requestRender();
@@ -2062,6 +2169,17 @@ function updateCardDrag(event) {
   if (!interaction.drag) {
     return;
   }
+  if (!interaction.drag.moved) {
+    const movedDistance = Math.hypot(
+      event.clientX - interaction.drag.startScreen.x,
+      event.clientY - interaction.drag.startScreen.y
+    );
+    if (movedDistance < 7) {
+      return;
+    }
+    interaction.drag.moved = true;
+  }
+
   const currentRect = getWorldRect(interaction.drag.cardId);
   const worldPoint = screenToWorld({ x: event.clientX, y: event.clientY });
   const nextWorldX = worldPoint.x - interaction.drag.offsetX;
@@ -2075,6 +2193,9 @@ function updateCardDrag(event) {
       x: deltaX,
       y: deltaY
     });
+  } else if (interaction.drag.kind === "move") {
+    resolveMobileCardOverlap(interaction.drag.cardId, { x: deltaX, y: deltaY });
+    ensureCardBelowMobileControls(interaction.drag.cardId);
   }
   requestRender();
 }
@@ -2090,12 +2211,35 @@ function finishCardDrag() {
     return;
   }
 
+  if (!drag.moved && drag.tapToEdit) {
+    focusCardBodyAtEnd(drag.cardId);
+    requestRender();
+    return;
+  }
+
   if (!isMobileLayout()) {
     resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
+  } else {
+    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 });
+    ensureCardBelowMobileControls(drag.cardId);
   }
   bringCardsForward(drag.targetCardIds);
   scheduleSave();
   requestRender();
+}
+
+function focusCardBodyAtEnd(cardId) {
+  const body = cardElements.get(cardId)?.querySelector(".card-body");
+  if (!body) {
+    return;
+  }
+  body.focus({ preventScroll: true });
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(body);
+  range.collapse(false);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
 }
 
 function startCardResize(event, cardId, corner) {
@@ -2772,11 +2916,19 @@ function getWorldRect(cardId) {
 
 function centerBoardView() {
   const bounds = getCenterViewBounds();
-  const focusRect = getCanvasFocusRect();
-  if (!bounds || bounds.w <= 0 || bounds.h <= 0 || focusRect.width <= 0 || focusRect.height <= 0) {
+  if (!bounds || bounds.w <= 0 || bounds.h <= 0) {
     Object.assign(state.camera, defaultCamera());
     scheduleSave();
     requestRender();
+    return;
+  }
+
+  centerBoundsInCanvas(bounds);
+}
+
+function centerBoundsInCanvas(bounds) {
+  const focusRect = getCanvasFocusRect();
+  if (!bounds || bounds.w <= 0 || bounds.h <= 0 || focusRect.width <= 0 || focusRect.height <= 0) {
     return;
   }
 
@@ -3152,6 +3304,10 @@ function syncCards() {
     body.setAttribute("aria-label", card.isLabel ? `${displayText || "Untitled"} group` : "Note text");
     if (card.isLabel && fitLabelCardToText(card.id, body)) {
       ensureCardBelowMobileControls(card.id);
+      if (isMobileLayout()) {
+        resolveMobileCardOverlap(card.id, { x: 0, y: 1 });
+        ensureCardBelowMobileControls(card.id);
+      }
       resizedLabelCard = true;
     }
 
