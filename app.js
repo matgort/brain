@@ -518,15 +518,31 @@ function constrainMobileCanvasPoint(clientX, clientY) {
     return { x: clientX, y: clientY };
   }
 
-  const chromeBottom = dom.chrome?.getBoundingClientRect().bottom || 0;
-  const paletteBottom = uiState.paletteVisible && !dom.palette.hidden
-    ? dom.palette.getBoundingClientRect().bottom
-    : 0;
-  const usableTop = Math.max(chromeBottom, paletteBottom) + 8;
+  const usableTop = getMobileCanvasTop();
   return {
     x: clamp(clientX, 0, window.innerWidth),
     y: clamp(clientY, usableTop, window.innerHeight)
   };
+}
+
+function getMobileCanvasTop() {
+  const chromeBottom = dom.chrome?.getBoundingClientRect().bottom || 0;
+  const paletteBottom = uiState.paletteVisible && !dom.palette.hidden
+    ? dom.palette.getBoundingClientRect().bottom
+    : 0;
+  return Math.max(chromeBottom, paletteBottom) + 8;
+}
+
+function ensureCardBelowMobileControls(cardId) {
+  if (!isMobileLayout() || !state.cards[cardId]) {
+    return;
+  }
+  const rect = getWorldRect(cardId);
+  const screenTop = worldToScreen({ x: rect.x, y: rect.y }).y;
+  const usableTop = getMobileCanvasTop();
+  if (screenTop < usableTop) {
+    moveCardBy(cardId, 0, (usableTop - screenTop) / state.camera.scale);
+  }
 }
 
 function toggleMobileNewCardMode() {
@@ -1376,7 +1392,9 @@ function createLabelCard(title, seedRootId) {
     id,
     parentId: null,
     x: bounds.x + bounds.w / 2 - width / 2,
-    y: bounds.y - height - CARD_GAP * 2,
+    y: isMobileLayout()
+      ? bounds.y + bounds.h + CARD_GAP * 2
+      : bounds.y - height - CARD_GAP * 2,
     w: width,
     h: height,
     color: state.cards[seedRootId]?.color || LABEL_CARD_FILL,
@@ -1396,7 +1414,11 @@ function createLabelCard(title, seedRootId) {
     order: state.nextOrder++
   };
 
-  resolveCardPlacement(id, { x: 0, y: -1 });
+  if (isMobileLayout()) {
+    ensureCardBelowMobileControls(id);
+  } else {
+    resolveCardPlacement(id, { x: 0, y: -1 });
+  }
   return id;
 }
 
@@ -1959,6 +1981,7 @@ function finishDraft() {
   }
 
   const cardId = createCard(rect);
+  ensureCardBelowMobileControls(cardId);
   setSelectedCard(cardId);
   uiState.pendingFocusCardId = cardId;
   if (isMobileLayout()) {
@@ -3128,6 +3151,7 @@ function syncCards() {
     body.setAttribute("aria-multiline", card.isLabel ? "false" : "true");
     body.setAttribute("aria-label", card.isLabel ? `${displayText || "Untitled"} group` : "Note text");
     if (card.isLabel && fitLabelCardToText(card.id, body)) {
+      ensureCardBelowMobileControls(card.id);
       resizedLabelCard = true;
     }
 
