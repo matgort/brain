@@ -2047,7 +2047,7 @@ function updateCardDrag(event) {
   const deltaY = nextWorldY - currentRect.y;
   moveCardSetBy(interaction.drag.targetCardIds, deltaX, deltaY);
   interaction.drag.pointer = { x: event.clientX, y: event.clientY };
-  if (interaction.drag.kind === "move") {
+  if (interaction.drag.kind === "move" && !isMobileLayout()) {
     resolveCardSetPlacement(interaction.drag.targetCardIds, {
       x: deltaX,
       y: deltaY
@@ -2067,7 +2067,9 @@ function finishCardDrag() {
     return;
   }
 
-  resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
+  if (!isMobileLayout()) {
+    resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
+  }
   bringCardsForward(drag.targetCardIds);
   scheduleSave();
   requestRender();
