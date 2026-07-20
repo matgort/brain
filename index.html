@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    >
+    <title>Brainstorm Canvas</title>
+    <meta name="theme-color" content="#d7d7d7">
+    <link rel="stylesheet" href="styles.css?v=20260720m">
+  </head>
+  <body>
+    <div class="page-frame">
+      <header id="chrome" class="chrome">
+        <nav class="category-row" aria-label="Brainstorm controls">
+          <button
+            id="titleButton"
+            class="category-pill category-pill--more title-button"
+            type="button"
+          >
+            Title
+          </button>
+          <button
+            id="swatchToggle"
+            class="category-pill category-pill--more"
+            type="button"
+            aria-pressed="false"
+          >
+            Swatch
+          </button>
+          <button class="category-pill tool-button" data-tool="bucket" type="button">
+            Fill
+          </button>
+          <button class="category-pill tool-button" data-tool="brush" type="button">
+            Link
+          </button>
+          <button class="category-pill tool-button" data-tool="label" type="button">
+            Label
+          </button>
+          <button class="category-pill tool-button" data-tool="size" type="button">
+            Text
+          </button>
+          <button class="category-pill tool-button" data-tool="delete" type="button">
+            Delete
+          </button>
+          <button
+            id="centerView"
+            class="category-pill category-pill--more"
+            type="button"
+          >
+            Center
+          </button>
+          <button
+            id="saveBoard"
+            class="category-pill category-pill--more"
+            type="button"
+          >
+            Save
+          </button>
+          <button
+            id="importBoard"
+            class="category-pill category-pill--more"
+            type="button"
+          >
+            Import
+          </button>
+          <button
+            id="infoButton"
+            class="category-pill category-pill--more"
+            type="button"
+          >
+            Info
+          </button>
+          <button
+            id="resetView"
+            class="category-pill category-pill--round"
+            type="button"
+          >
+            Reset
+          </button>
+        </nav>
+
+        <div class="utility-row">
+          <div id="palette" class="palette" aria-label="Available colors" hidden></div>
+        </div>
+      </header>
+
+      <div id="textToolbar" class="text-toolbar" role="toolbar" aria-label="Text editing" hidden>
+        <span id="textToolbarHint" class="text-toolbar-hint">Select a note</span>
+        <button id="editTextButton" class="text-toolbar-button" type="button">Edit</button>
+        <button id="decreaseTextButton" class="text-toolbar-button text-toolbar-button--size" type="button" aria-label="Make text smaller">A−</button>
+        <button id="increaseTextButton" class="text-toolbar-button text-toolbar-button--size" type="button" aria-label="Make text larger">A+</button>
+        <span class="text-toolbar-divider" aria-hidden="true"></span>
+        <button id="boldTextButton" class="text-toolbar-button text-toolbar-button--format" type="button" aria-label="Bold text" aria-pressed="false"><strong>B</strong></button>
+        <button id="italicTextButton" class="text-toolbar-button text-toolbar-button--format" type="button" aria-label="Italic text" aria-pressed="false"><em>I</em></button>
+        <button id="underlineTextButton" class="text-toolbar-button text-toolbar-button--format" type="button" aria-label="Underline text" aria-pressed="false"><u>U</u></button>
+        <span class="text-toolbar-divider" aria-hidden="true"></span>
+        <button id="alignLeftButton" class="text-toolbar-button" type="button" aria-label="Align text left" aria-pressed="false">Left</button>
+        <button id="alignCenterButton" class="text-toolbar-button" type="button" aria-label="Align text center" aria-pressed="false">Center</button>
+        <button id="alignRightButton" class="text-toolbar-button" type="button" aria-label="Align text right" aria-pressed="false">Right</button>
+        <button id="resetTextButton" class="text-toolbar-button" type="button">Default</button>
+      </div>
+
+      <main id="viewport" class="viewport" aria-label="Infinite idea canvas" tabindex="-1">
+        <svg id="connectionsLayer" class="connections-layer" aria-hidden="true"></svg>
+        <div id="scene" class="scene">
+          <div id="cardsLayer" class="cards-layer"></div>
+        </div>
+        <svg id="overlayLayer" class="overlay-layer" aria-hidden="true"></svg>
+        <div id="draftRect" class="draft-rect" hidden></div>
+      </main>
+    </div>
+
+    <div id="resetModal" class="modal-backdrop" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="resetModalTitle">
+        <h2 id="resetModalTitle" class="modal-title">Wipe board?</h2>
+        <p class="modal-copy">Reset everything on the canvas?</p>
+        <div class="modal-actions">
+          <button
+            id="resetConfirmButton"
+            class="category-pill tool-button"
+            type="button"
+          >
+            Yes
+          </button>
+          <button
+            id="resetCancelButton"
+            class="category-pill category-pill--round"
+            type="button"
+          >
+            No
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="deleteModal" class="modal-backdrop" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteModalTitle">
+        <h2 id="deleteModalTitle" class="modal-title">Delete card?</h2>
+        <p class="modal-copy">Are you sure you want to delete?</p>
+        <div class="modal-actions">
+          <button
+            id="deleteConfirmButton"
+            class="category-pill tool-button"
+            type="button"
+          >
+            Yes
+          </button>
+          <button
+            id="deleteCancelButton"
+            class="category-pill category-pill--round"
+            type="button"
+          >
+            No
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="saveModal" class="modal-backdrop" hidden>
+      <div
+        class="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="saveModalTitle"
+      >
+        <h2 id="saveModalTitle" class="modal-title">Save board</h2>
+        <label class="save-title-label" for="boardTitleInput">Page title</label>
+        <input
+          id="boardTitleInput"
+          class="save-title-input"
+          type="text"
+          maxlength="120"
+          autocomplete="off"
+          placeholder="Untitled board"
+        >
+        <p class="modal-copy save-format-label">Choose a format</p>
+        <div class="modal-actions">
+          <button
+            id="saveImageButton"
+            class="category-pill tool-button"
+            type="button"
+          >
+            Image
+          </button>
+          <button
+            id="saveTextButton"
+            class="category-pill tool-button"
+            type="button"
+          >
+            Text
+          </button>
+          <button
+            id="saveCodeButton"
+            class="category-pill tool-button"
+            type="button"
+          >
+            Code
+          </button>
+          <button
+            id="saveCancelButton"
+            class="category-pill category-pill--round"
+            type="button"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="infoModal" class="modal-backdrop" hidden>
+      <div
+        class="modal-card modal-card--info"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="infoModalTitle"
+      >
+        <h2 id="infoModalTitle" class="modal-title modal-title--large">Brainstorm Canvas</h2>
+        <p class="modal-intro">
+          Organize many different threads of writing in one place. Spread ideas across an
+          infinite canvas, connect related thoughts, and gather them into named groups.
+        </p>
+
+        <div class="info-grid">
+          <section class="info-section">
+            <h3>Write</h3>
+            <p><strong>Create a note</strong> by dragging a rectangle on empty canvas, then type inside it.</p>
+            <p><strong>Prompt new writing</strong> with a question, fragment, quotation, or task on its own card, then build related responses around it.</p>
+            <p><strong>Edit</strong> by clicking the text. Press Shift + Enter to finish and fit the card to its writing.</p>
+            <p><strong>Move or resize</strong> with a card’s edges and corners. Use Text for editing, type size, bold, italic, underline, and alignment.</p>
+          </section>
+
+          <section class="info-section">
+            <h3>Organize</h3>
+            <p><strong>Swatch</strong> opens the color palette. <strong>Fill</strong> applies the chosen color to a note and its descendants.</p>
+            <p><strong>Link</strong> lets you draw from one note stack to another. Linked threads share a color and become one connected group.</p>
+            <p><strong>Label</strong> names a connected group. Click its label card to collapse or reopen the group.</p>
+            <p><strong>Delete</strong> removes the selected note or group after confirmation.</p>
+          </section>
+
+          <section class="info-section">
+            <h3>Navigate</h3>
+            <p>The canvas is effectively <strong>infinite</strong>, so threads can spread beyond the screen without needing pages.</p>
+            <p><strong>Pan</strong> with a trackpad or mouse wheel, or hold Space while dragging. Pinch, or use Command/Control + scroll, to zoom.</p>
+            <p><strong>Double-click</strong> a card to zoom toward it. <strong>Center</strong> frames the full board.</p>
+          </section>
+
+          <section class="info-section">
+            <h3>Keep your work</h3>
+            <p>Your board <strong>autosaves in this browser</strong>. It is not synced to other browsers or devices.</p>
+            <p><strong>Save</strong> exports the board as an image, readable text, or Code—a complete JSON backup.</p>
+            <p><strong>Import</strong> restores a Code backup. Make regular Code backups before clearing browser data.</p>
+            <p><strong>Reset</strong> permanently wipes the current browser’s board after confirmation.</p>
+          </section>
+        </div>
+
+        <div class="modal-actions info-actions">
+          <button id="infoCloseButton" class="category-pill tool-button" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="titleModal" class="modal-backdrop" hidden>
+      <form
+        id="titleForm"
+        class="modal-card modal-card--wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="titleModalTitle"
+      >
+        <h2 id="titleModalTitle" class="modal-title">Page title</h2>
+        <label class="sr-only" for="titleInput">Page title</label>
+        <input
+          id="titleInput"
+          class="save-title-input title-modal-input"
+          type="text"
+          maxlength="120"
+          autocomplete="off"
+          placeholder="Untitled board"
+        >
+        <div class="modal-actions title-modal-actions">
+          <button class="category-pill tool-button" type="submit">Save title</button>
+          <button id="titleCancelButton" class="category-pill category-pill--round" type="button">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="labelModal" class="modal-backdrop modal-backdrop--label" hidden>
+      <form
+        id="labelForm"
+        class="modal-card label-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="labelModalTitle"
+      >
+        <label id="labelModalTitle" class="sr-only" for="labelInput">Group title</label>
+        <input
+          id="labelInput"
+          class="label-modal-input"
+          type="text"
+          name="title"
+          maxlength="96"
+          autocomplete="off"
+          placeholder="Untitled group"
+        >
+        <button class="sr-only" type="submit">Create label</button>
+      </form>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden>
+      <span id="toastMessage"></span>
+      <button id="toastAction" class="toast-action" type="button" hidden>Undo</button>
+    </div>
+
+    <input id="importFileInput" type="file" accept=".json,application/json" hidden>
+
+    <script src="app.js?v=20260720j"></script>
+  </body>
+</html>
