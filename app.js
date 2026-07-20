@@ -153,7 +153,6 @@ let state = loadState();
 let renderQueued = false;
 let saveTimer = 0;
 let isSpacePressed = false;
-let pendingGlobalCardRefit = true;
 let toastTimer = 0;
 let undoSnapshot = null;
 
@@ -170,9 +169,9 @@ function boot() {
 
 function bindEvents() {
   dom.viewport.addEventListener("pointerdown", handlePointerDown);
-  dom.viewport.addEventListener("pointermove", handlePointerMove);
-  dom.viewport.addEventListener("pointerup", handlePointerUp);
-  dom.viewport.addEventListener("pointercancel", handlePointerCancel);
+  window.addEventListener("pointermove", handlePointerMove, { passive: false });
+  window.addEventListener("pointerup", handlePointerUp);
+  window.addEventListener("pointercancel", handlePointerCancel);
   dom.viewport.addEventListener("wheel", handleWheel, { passive: false });
 
   dom.palette.addEventListener("click", handlePaletteClick);
@@ -499,13 +498,35 @@ function setTool(tool) {
   }
   cancelActiveInteraction();
   uiState.mobileNewCardMode = false;
+  uiState.colorTargetPending = false;
+  uiState.paletteEditingCardId = null;
   uiState.currentTool = tool;
+  if (isMobileLayout() && tool !== "default" && uiState.paletteVisible) {
+    uiState.paletteVisible = false;
+    syncPaletteVisibility();
+  }
   applyToolState();
   requestRender();
 }
 
 function isMobileLayout() {
   return window.matchMedia("(max-width: 760px), (pointer: coarse)").matches;
+}
+
+function constrainMobileCanvasPoint(clientX, clientY) {
+  if (!isMobileLayout()) {
+    return { x: clientX, y: clientY };
+  }
+
+  const chromeBottom = dom.chrome?.getBoundingClientRect().bottom || 0;
+  const paletteBottom = uiState.paletteVisible && !dom.palette.hidden
+    ? dom.palette.getBoundingClientRect().bottom
+    : 0;
+  const usableTop = Math.max(chromeBottom, paletteBottom) + 8;
+  return {
+    x: clamp(clientX, 0, window.innerWidth),
+    y: clamp(clientY, usableTop, window.innerHeight)
+  };
 }
 
 function toggleMobileNewCardMode() {
@@ -515,6 +536,7 @@ function toggleMobileNewCardMode() {
   const nextActive = !uiState.mobileNewCardMode;
   cancelActiveInteraction();
   uiState.currentTool = "default";
+  uiState.colorTargetPending = false;
   uiState.mobileNewCardMode = nextActive;
   applyToolState();
   requestRender();
@@ -593,7 +615,6 @@ function autoFitDeselectedCard(cardId) {
   }
 
   card.text = readCardBodyText(body);
-  fitCardToText(cardId, body);
   if (uiState.pendingFocusCardId === cardId) {
     uiState.pendingFocusCardId = null;
   }
@@ -971,6 +992,7 @@ function handleCardInput(event) {
     return;
   }
   card.text = readCardBodyText(body);
+  growCardHeightToContent(id, body);
   scheduleSave();
 }
 
@@ -1550,12 +1572,10 @@ function adjustSelectedTextScale(factor) {
   if (!card || !body) {
     return;
   }
-  const previousScale = getCardFontScale(card);
-  const nextScale = clamp(previousScale * factor, MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
+  const nextScale = clamp(getCardFontScale(card) * factor, MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
   card.fontScale = nextScale;
-  card.widthCap = clamp(getNoteWidthCap(card) * (nextScale / previousScale), MAX_NOTE_CARD_WIDTH, MAX_RESIZED_NOTE_WIDTH);
   body.style.setProperty("--card-font-scale", String(nextScale));
-  fitCardToText(card.id, body, { preserveCenter: true });
+  growCardHeightToContent(card.id, body);
   scheduleSave();
   requestRender();
 }
@@ -1567,14 +1587,13 @@ function resetSelectedTextScale() {
     return;
   }
   card.fontScale = 1;
-  card.widthCap = MAX_NOTE_CARD_WIDTH;
   card.fontWeight = "400";
   card.fontStyle = "normal";
   card.textDecoration = "none";
   card.textAlign = "left";
   body.style.setProperty("--card-font-scale", "1");
   applyCardTextFormatting(body, card);
-  fitCardToText(card.id, body, { preserveCenter: true });
+  growCardHeightToContent(card.id, body);
   scheduleSave();
   requestRender();
 }
@@ -1587,7 +1606,7 @@ function toggleSelectedTextFormat(property, activeValue, defaultValue) {
   }
   card[property] = card[property] === activeValue ? defaultValue : activeValue;
   applyCardTextFormatting(body, card);
-  fitCardToText(card.id, body, { preserveCenter: true });
+  growCardHeightToContent(card.id, body);
   scheduleSave();
   requestRender();
 }
@@ -1650,29 +1669,36 @@ function finishEditingAndFitCard(cardId, body) {
   requestRender();
 }
 
-function fitCardToText(cardId, body, options = {}) {
+function fitCardToText(cardId, body) {
   const card = state.cards[cardId];
   if (!card) {
     return;
   }
 
-  const previousRect = options.preserveCenter ? getWorldRect(cardId) : null;
   const content = normalizeCardText(card.text);
-  const { width, height } = measureCardTextBlock(
+  const { height } = measureCardTextBlock(
     body,
     content,
-    getNoteWidthCap(card) - CARD_TEXT_INSET_X * 2
+    Math.max(1, card.w - CARD_TEXT_INSET_X * 2),
+    { fixedWidth: true }
   );
-  card.w = clamp(width + CARD_TEXT_INSET_X * 2, getCardFitMinWidth(card), getNoteWidthCap(card));
   card.h = Math.max(getCardFitMinHeight(card), height + CARD_TEXT_INSET_Y * 2);
-  if (previousRect) {
-    setCardWorldPosition(
-      cardId,
-      previousRect.x + previousRect.w / 2 - card.w / 2,
-      previousRect.y + previousRect.h / 2 - card.h / 2
-    );
+}
+
+function growCardHeightToContent(cardId, body) {
+  const card = state.cards[cardId];
+  if (!card || card.isLabel || !body) {
+    return false;
   }
-  resolveCardPlacement(cardId, { x: 0, y: 0 });
+
+  const requiredHeight = Math.ceil(body.scrollHeight) + CARD_TEXT_INSET_Y * 2;
+  if (requiredHeight <= card.h) {
+    return false;
+  }
+
+  card.h = requiredHeight;
+  requestRender();
+  return true;
 }
 
 function fitLabelCardToText(cardId, body) {
@@ -1704,7 +1730,7 @@ function fitLabelCardToText(cardId, body) {
   return true;
 }
 
-function measureCardTextBlock(body, content, maxWidth) {
+function measureCardTextBlock(body, content, maxWidth, options = {}) {
   if (!content) {
     return { width: 0, height: 0 };
   }
@@ -1731,8 +1757,8 @@ function measureCardTextBlock(body, content, maxWidth) {
   measurer.style.padding = "0";
   measurer.style.margin = "0";
   measurer.style.border = "0";
-  measurer.style.width = "max-content";
-  measurer.style.maxWidth = `${Math.max(0, maxWidth)}px`;
+  measurer.style.width = options.fixedWidth ? `${Math.max(1, maxWidth)}px` : "max-content";
+  measurer.style.maxWidth = options.fixedWidth ? "none" : `${Math.max(0, maxWidth)}px`;
   measurer.style.boxSizing = "border-box";
   document.body.appendChild(measurer);
 
@@ -1895,7 +1921,7 @@ function startDraft(event) {
   interaction.mode = "draw";
   interaction.primaryPointerId = event.pointerId;
   capturePointer(event.pointerId);
-  const startScreen = { x: event.clientX, y: event.clientY };
+  const startScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
   const startWorld = screenToWorld(startScreen);
   interaction.draft = {
     startScreen,
@@ -1910,7 +1936,7 @@ function updateDraft(event) {
   if (!interaction.draft) {
     return;
   }
-  interaction.draft.currentScreen = { x: event.clientX, y: event.clientY };
+  interaction.draft.currentScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
   interaction.draft.currentWorld = screenToWorld(interaction.draft.currentScreen);
   updateDraftRect();
 }
@@ -1933,7 +1959,6 @@ function finishDraft() {
   }
 
   const cardId = createCard(rect);
-  resolveCardPlacement(cardId, { x: 1, y: 1 });
   setSelectedCard(cardId);
   uiState.pendingFocusCardId = cardId;
   if (isMobileLayout()) {
@@ -2179,16 +2204,11 @@ function updateCardScale(event) {
   );
 
   card.fontScale = clamp(scale.startFontScale * scaleFactor, MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
-  card.widthCap = clamp(
-    scale.startWidthCap * scaleFactor,
-    MAX_NOTE_CARD_WIDTH,
-    MAX_RESIZED_NOTE_WIDTH
-  );
   card.fitMinWidth = FIT_CARD_MIN_WIDTH;
   card.fitMinHeight = FIT_CARD_MIN_HEIGHT;
 
   body.style.setProperty("--card-font-scale", String(getCardFontScale(card)));
-  fitCardToText(scale.cardId, body, { preserveCenter: true });
+  growCardHeightToContent(scale.cardId, body);
   requestRender();
 }
 
@@ -2213,8 +2233,9 @@ function startBrush(event, cardId) {
   interaction.primaryPointerId = event.pointerId;
   capturePointer(event.pointerId);
   const sourceId = getRootId(cardId);
-  const start = cardCenter(getWorldRect(sourceId));
-  const pointer = screenToWorld({ x: event.clientX, y: event.clientY });
+  const start = cardCenter(getWorldRect(cardId));
+  const pointerScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
+  const pointer = screenToWorld(pointerScreen);
   interaction.brush = {
     sourceId,
     points: [start],
@@ -2228,7 +2249,8 @@ function updateBrush(event) {
   if (!interaction.brush) {
     return;
   }
-  const point = screenToWorld({ x: event.clientX, y: event.clientY });
+  const pointerScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
+  const point = screenToWorld(pointerScreen);
   interaction.brush.currentPoint = point;
   const last = interaction.brush.points[interaction.brush.points.length - 1];
   if (!last || distanceBetween(last, point) > 24 / state.camera.scale) {
@@ -2272,7 +2294,9 @@ function finishBrush(event) {
   applyColorToSubtree(brush.sourceId, sharedColor);
   applyColorToSubtree(targetId, sharedColor);
   upsertConnection(brush.sourceId, targetId, simplifyPathPoints(brush.points), sharedColor);
-  pullRootsTogether(brush.sourceId, targetId);
+  if (!isMobileLayout()) {
+    pullRootsTogether(brush.sourceId, targetId);
+  }
   scheduleSave();
   requestRender();
 }
@@ -2895,7 +2919,6 @@ function wipeBoard() {
   uiState.pendingLabelRootId = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
-  pendingGlobalCardRefit = false;
   cancelActiveInteraction();
   localStorage.removeItem(STORAGE_KEY);
   requestRender();
@@ -2988,7 +3011,6 @@ async function handleImportFileChange(event) {
     uiState.pendingLabelRootId = null;
     uiState.pendingDeleteCardId = null;
     uiState.pendingFocusCardId = null;
-    pendingGlobalCardRefit = true;
     cancelActiveInteraction();
     saveNow();
     requestRender();
@@ -3062,7 +3084,6 @@ function syncCards() {
   });
 
   let resizedLabelCard = false;
-  let refitPendingNotes = false;
   orderedCards.forEach((card) => {
     const displayFill = isHex(card.color)
       ? card.color
@@ -3104,19 +3125,6 @@ function syncCards() {
     body.setAttribute("role", card.isLabel ? "button" : "textbox");
     body.setAttribute("aria-multiline", card.isLabel ? "false" : "true");
     body.setAttribute("aria-label", card.isLabel ? `${displayText || "Untitled"} group` : "Note text");
-    if (pendingGlobalCardRefit && !card.isLabel && document.activeElement !== body) {
-      const previousRect = getWorldRect(card.id);
-      fitCardToText(card.id, body);
-      const nextRect = getWorldRect(card.id);
-      if (
-        previousRect.x !== nextRect.x ||
-        previousRect.y !== nextRect.y ||
-        previousRect.w !== nextRect.w ||
-        previousRect.h !== nextRect.h
-      ) {
-        refitPendingNotes = true;
-      }
-    }
     if (card.isLabel && fitLabelCardToText(card.id, body)) {
       resizedLabelCard = true;
     }
@@ -3128,11 +3136,7 @@ function syncCards() {
     element.style.height = `${card.h}px`;
   });
 
-  if (pendingGlobalCardRefit) {
-    pendingGlobalCardRefit = false;
-  }
-
-  if (resizedLabelCard || refitPendingNotes) {
+  if (resizedLabelCard) {
     scheduleSave();
     requestRender();
   }
@@ -3203,7 +3207,6 @@ function restoreUndoSnapshot() {
   uiState.pendingLabelRootId = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
-  pendingGlobalCardRefit = true;
   cancelActiveInteraction();
   saveNow();
   requestRender();
