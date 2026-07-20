@@ -8,12 +8,20 @@
     >
     <title>Brainstorm Canvas</title>
     <meta name="theme-color" content="#d7d7d7">
-    <link rel="stylesheet" href="styles.css?v=20260720m">
+    <link rel="stylesheet" href="styles.css?v=20260720o">
   </head>
   <body>
     <div class="page-frame">
       <header id="chrome" class="chrome">
         <nav class="category-row" aria-label="Brainstorm controls">
+          <button
+            id="mobileNewCardButton"
+            class="category-pill category-pill--more mobile-only-control"
+            type="button"
+            aria-pressed="false"
+          >
+            New Card
+          </button>
           <button
             id="titleButton"
             class="category-pill category-pill--more title-button"
@@ -232,7 +240,7 @@
         <div class="info-grid">
           <section class="info-section">
             <h3>Write</h3>
-            <p><strong>Create a note</strong> by dragging a rectangle on empty canvas, then type inside it.</p>
+            <p><strong>Create a note</strong> by dragging a rectangle on empty canvas. On a phone, tap New Card and then tap the canvas. Type inside the new note.</p>
             <p><strong>Prompt new writing</strong> with a question, fragment, quotation, or task on its own card, then build related responses around it.</p>
             <p><strong>Edit</strong> by clicking the text. Press Shift + Enter to finish and fit the card to its writing.</p>
             <p><strong>Move or resize</strong> with a card’s edges and corners. Use Text for editing, type size, bold, italic, underline, and alignment.</p>
@@ -249,7 +257,7 @@
           <section class="info-section">
             <h3>Navigate</h3>
             <p>The canvas is effectively <strong>infinite</strong>, so threads can spread beyond the screen without needing pages.</p>
-            <p><strong>Pan</strong> with a trackpad or mouse wheel, or hold Space while dragging. Pinch, or use Command/Control + scroll, to zoom.</p>
+            <p><strong>Pan</strong> with a trackpad or mouse wheel, or hold Space while dragging. On a phone, swipe empty canvas. Pinch, or use Command/Control + scroll, to zoom.</p>
             <p><strong>Double-click</strong> a card to zoom toward it. <strong>Center</strong> frames the full board. <strong>Fullscreen</strong> hides the browser chrome for more canvas space.</p>
           </section>
 
@@ -322,6 +330,6 @@
 
     <input id="importFileInput" type="file" accept=".json,application/json" hidden>
 
-    <script src="app.js?v=20260720l"></script>
+    <script src="app.js?v=20260720n"></script>
   </body>
 </html>

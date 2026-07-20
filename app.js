@@ -72,6 +72,7 @@ const dom = {
   overlayLayer: document.getElementById("overlayLayer"),
   palette: document.getElementById("palette"),
   swatchToggle: document.getElementById("swatchToggle"),
+  mobileNewCardButton: document.getElementById("mobileNewCardButton"),
   resetModal: document.getElementById("resetModal"),
   resetConfirmButton: document.getElementById("resetConfirmButton"),
   resetCancelButton: document.getElementById("resetCancelButton"),
@@ -128,7 +129,9 @@ const uiState = {
   pendingLabelRootId: null,
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
-  labelModalPrimed: false
+  labelModalPrimed: false,
+  mobileNewCardMode: false,
+  mobileLinkSourceId: null
 };
 
 const interaction = {
@@ -173,6 +176,7 @@ function bindEvents() {
 
   dom.palette.addEventListener("click", handlePaletteClick);
   dom.swatchToggle.addEventListener("click", togglePaletteVisibility);
+  dom.mobileNewCardButton.addEventListener("click", toggleMobileNewCardMode);
   dom.toolButtons.forEach((button) => {
     button.addEventListener("click", () => toggleTool(button.dataset.tool));
   });
@@ -444,6 +448,11 @@ function syncPaletteSizing() {
     return;
   }
 
+  if (window.matchMedia("(max-width: 760px) and (orientation: portrait)").matches) {
+    dom.palette.style.setProperty("--palette-swatch-size", "32px");
+    return;
+  }
+
   const paletteStyle = window.getComputedStyle(dom.palette);
   const top = Number.parseFloat(paletteStyle.top) || 0;
   const gap = Number.parseFloat(paletteStyle.rowGap || paletteStyle.gap) || 0;
@@ -465,6 +474,8 @@ function applyToolState() {
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
   });
+  dom.mobileNewCardButton.classList.toggle("is-active", uiState.mobileNewCardMode);
+  dom.mobileNewCardButton.setAttribute("aria-pressed", uiState.mobileNewCardMode ? "true" : "false");
   if (dom.toolHint) {
     dom.toolHint.textContent = TOOL_HINTS[uiState.currentTool] || "";
   }
@@ -484,7 +495,25 @@ function setTool(tool) {
     return;
   }
   cancelActiveInteraction();
+  uiState.mobileNewCardMode = false;
+  uiState.mobileLinkSourceId = null;
   uiState.currentTool = tool;
+  applyToolState();
+  requestRender();
+}
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 760px)").matches;
+}
+
+function toggleMobileNewCardMode() {
+  if (!isMobileLayout()) {
+    return;
+  }
+  const nextActive = !uiState.mobileNewCardMode;
+  cancelActiveInteraction();
+  uiState.currentTool = "default";
+  uiState.mobileNewCardMode = nextActive;
   applyToolState();
   requestRender();
 }
@@ -495,6 +524,10 @@ function handlePaletteClick(event) {
     return;
   }
   uiState.activeColor = button.dataset.color;
+  if (isMobileLayout()) {
+    uiState.paletteVisible = false;
+    syncPaletteVisibility();
+  }
   syncPalette();
 }
 
@@ -508,6 +541,12 @@ function syncPalette() {
 
 function togglePaletteVisibility() {
   uiState.paletteVisible = !uiState.paletteVisible;
+  if (uiState.paletteVisible && isMobileLayout()) {
+    uiState.mobileNewCardMode = false;
+    uiState.mobileLinkSourceId = null;
+    uiState.currentTool = "default";
+    applyToolState();
+  }
   syncPaletteVisibility();
 }
 
@@ -574,6 +613,20 @@ function handlePointerDown(event) {
   const gripElement = event.target.closest(".card-grip");
   const bodyElement = event.target.closest(".card-body");
 
+  if (
+    isMobileLayout() &&
+    uiState.currentTool === "default" &&
+    !cardElement
+  ) {
+    event.preventDefault();
+    if (uiState.mobileNewCardMode) {
+      createMobileCardAt(event.clientX, event.clientY);
+    } else {
+      startPan(event);
+    }
+    return;
+  }
+
   if (uiState.currentTool === "bucket") {
     if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
       event.preventDefault();
@@ -596,6 +649,18 @@ function handlePointerDown(event) {
   }
 
   if (uiState.currentTool === "brush") {
+    if (isMobileLayout()) {
+      event.preventDefault();
+      if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
+        handleMobileLinkTap(cardElement.dataset.id);
+      } else {
+        uiState.mobileLinkSourceId = null;
+        setSelectedCard(null);
+        showToast("Link canceled");
+        requestRender();
+      }
+      return;
+    }
     if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
       event.preventDefault();
       startBrush(event, cardElement.dataset.id);
@@ -2220,6 +2285,46 @@ function upsertConnection(fromId, toId, points, color) {
   });
 }
 
+function handleMobileLinkTap(cardId) {
+  const rootId = getRootId(cardId);
+  if (!rootId || state.cards[rootId]?.isLabel) {
+    return;
+  }
+
+  if (!uiState.mobileLinkSourceId) {
+    uiState.mobileLinkSourceId = rootId;
+    setSelectedCard(cardId);
+    bringCardForward(cardId);
+    showToast("Tap another card to link");
+    requestRender();
+    return;
+  }
+
+  const sourceId = uiState.mobileLinkSourceId;
+  if (sourceId === rootId) {
+    uiState.mobileLinkSourceId = null;
+    showToast("Link canceled");
+    requestRender();
+    return;
+  }
+
+  const sharedColor = state.cards[sourceId]?.color || uiState.activeColor;
+  applyColorToSubtree(sourceId, sharedColor);
+  applyColorToSubtree(rootId, sharedColor);
+  upsertConnection(
+    sourceId,
+    rootId,
+    [cardCenter(getWorldRect(sourceId)), cardCenter(getWorldRect(rootId))],
+    sharedColor
+  );
+  pullRootsTogether(sourceId, rootId);
+  uiState.mobileLinkSourceId = null;
+  setSelectedCard(cardId);
+  scheduleSave();
+  requestRender();
+  showToast("Cards linked");
+}
+
 function beginGestureIfNeeded() {
   if (interaction.activeTouches.size < 2) {
     return false;
@@ -2333,6 +2438,24 @@ function createCard(rect) {
   };
 
   return id;
+}
+
+function createMobileCardAt(clientX, clientY) {
+  const point = screenToWorld({ x: clientX, y: clientY });
+  const width = 210;
+  const height = 128;
+  const cardId = createCard({
+    x: point.x - width / 2,
+    y: point.y - height / 2,
+    w: width,
+    h: height
+  });
+  resolveCardPlacement(cardId, { x: 0, y: 0 });
+  setSelectedCard(cardId);
+  uiState.pendingFocusCardId = cardId;
+  uiState.mobileNewCardMode = false;
+  scheduleSave();
+  requestRender();
 }
 
 function nextCardColor() {
