@@ -130,8 +130,7 @@ const uiState = {
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
   labelModalPrimed: false,
-  mobileNewCardMode: false,
-  mobileLinkSourceId: null
+  mobileNewCardMode: false
 };
 
 const interaction = {
@@ -448,7 +447,7 @@ function syncPaletteSizing() {
     return;
   }
 
-  if (window.matchMedia("(max-width: 760px) and (orientation: portrait)").matches) {
+  if (isMobileLayout()) {
     dom.palette.style.setProperty("--palette-swatch-size", "32px");
     return;
   }
@@ -496,14 +495,13 @@ function setTool(tool) {
   }
   cancelActiveInteraction();
   uiState.mobileNewCardMode = false;
-  uiState.mobileLinkSourceId = null;
   uiState.currentTool = tool;
   applyToolState();
   requestRender();
 }
 
 function isMobileLayout() {
-  return window.matchMedia("(max-width: 760px)").matches;
+  return window.matchMedia("(max-width: 760px), (pointer: coarse)").matches;
 }
 
 function toggleMobileNewCardMode() {
@@ -524,10 +522,6 @@ function handlePaletteClick(event) {
     return;
   }
   uiState.activeColor = button.dataset.color;
-  if (isMobileLayout()) {
-    uiState.paletteVisible = false;
-    syncPaletteVisibility();
-  }
   syncPalette();
 }
 
@@ -543,7 +537,6 @@ function togglePaletteVisibility() {
   uiState.paletteVisible = !uiState.paletteVisible;
   if (uiState.paletteVisible && isMobileLayout()) {
     uiState.mobileNewCardMode = false;
-    uiState.mobileLinkSourceId = null;
     uiState.currentTool = "default";
     applyToolState();
   }
@@ -552,6 +545,7 @@ function togglePaletteVisibility() {
 
 function syncPaletteVisibility() {
   dom.palette.hidden = !uiState.paletteVisible;
+  document.body.classList.toggle("is-palette-open", uiState.paletteVisible);
   dom.swatchToggle.classList.toggle("is-active", uiState.paletteVisible);
   dom.swatchToggle.setAttribute("aria-pressed", uiState.paletteVisible ? "true" : "false");
 }
@@ -620,7 +614,7 @@ function handlePointerDown(event) {
   ) {
     event.preventDefault();
     if (uiState.mobileNewCardMode) {
-      createMobileCardAt(event.clientX, event.clientY);
+      startDraft(event);
     } else {
       startPan(event);
     }
@@ -649,21 +643,12 @@ function handlePointerDown(event) {
   }
 
   if (uiState.currentTool === "brush") {
-    if (isMobileLayout()) {
+    const brushStartCard = cardElement || (
+      isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY) : null
+    );
+    if (brushStartCard && !state.cards[brushStartCard.dataset.id]?.isLabel) {
       event.preventDefault();
-      if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
-        handleMobileLinkTap(cardElement.dataset.id);
-      } else {
-        uiState.mobileLinkSourceId = null;
-        setSelectedCard(null);
-        showToast("Link canceled");
-        requestRender();
-      }
-      return;
-    }
-    if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
-      event.preventDefault();
-      startBrush(event, cardElement.dataset.id);
+      startBrush(event, brushStartCard.dataset.id);
     } else {
       setSelectedCard(null);
       requestRender();
@@ -1930,6 +1915,10 @@ function finishDraft() {
   resolveCardPlacement(cardId, { x: 1, y: 1 });
   setSelectedCard(cardId);
   uiState.pendingFocusCardId = cardId;
+  if (isMobileLayout()) {
+    uiState.mobileNewCardMode = false;
+    applyToolState();
+  }
   scheduleSave();
   requestRender();
 }
@@ -2240,7 +2229,12 @@ function finishBrush(event) {
     return;
   }
 
-  const targetElement = document.elementFromPoint(event.clientX, event.clientY)?.closest(".note-card");
+  const exactTarget = document.elementFromPoint(event.clientX, event.clientY)?.closest(".note-card");
+  const targetElement = exactTarget || (
+    isMobileLayout()
+      ? getCardNearScreenPoint(event.clientX, event.clientY, brush.sourceId, 38)
+      : null
+  );
   const targetId = targetElement?.dataset.id ? getRootId(targetElement.dataset.id) : null;
   if (
     !targetId ||
@@ -2285,44 +2279,24 @@ function upsertConnection(fromId, toId, points, color) {
   });
 }
 
-function handleMobileLinkTap(cardId) {
-  const rootId = getRootId(cardId);
-  if (!rootId || state.cards[rootId]?.isLabel) {
-    return;
-  }
-
-  if (!uiState.mobileLinkSourceId) {
-    uiState.mobileLinkSourceId = rootId;
-    setSelectedCard(cardId);
-    bringCardForward(cardId);
-    showToast("Tap another card to link");
-    requestRender();
-    return;
-  }
-
-  const sourceId = uiState.mobileLinkSourceId;
-  if (sourceId === rootId) {
-    uiState.mobileLinkSourceId = null;
-    showToast("Link canceled");
-    requestRender();
-    return;
-  }
-
-  const sharedColor = state.cards[sourceId]?.color || uiState.activeColor;
-  applyColorToSubtree(sourceId, sharedColor);
-  applyColorToSubtree(rootId, sharedColor);
-  upsertConnection(
-    sourceId,
-    rootId,
-    [cardCenter(getWorldRect(sourceId)), cardCenter(getWorldRect(rootId))],
-    sharedColor
-  );
-  pullRootsTogether(sourceId, rootId);
-  uiState.mobileLinkSourceId = null;
-  setSelectedCard(cardId);
-  scheduleSave();
-  requestRender();
-  showToast("Cards linked");
+function getCardNearScreenPoint(clientX, clientY, excludedRootId = null, radius = 30) {
+  let nearest = null;
+  let nearestDistance = radius;
+  cardElements.forEach((element, cardId) => {
+    const card = state.cards[cardId];
+    if (!card || card.isLabel || getRootId(cardId) === excludedRootId) {
+      return;
+    }
+    const rect = element.getBoundingClientRect();
+    const dx = Math.max(rect.left - clientX, 0, clientX - rect.right);
+    const dy = Math.max(rect.top - clientY, 0, clientY - rect.bottom);
+    const distance = Math.hypot(dx, dy);
+    if (distance <= nearestDistance) {
+      nearest = element;
+      nearestDistance = distance;
+    }
+  });
+  return nearest;
 }
 
 function beginGestureIfNeeded() {
@@ -2438,24 +2412,6 @@ function createCard(rect) {
   };
 
   return id;
-}
-
-function createMobileCardAt(clientX, clientY) {
-  const point = screenToWorld({ x: clientX, y: clientY });
-  const width = 210;
-  const height = 128;
-  const cardId = createCard({
-    x: point.x - width / 2,
-    y: point.y - height / 2,
-    w: width,
-    h: height
-  });
-  resolveCardPlacement(cardId, { x: 0, y: 0 });
-  setSelectedCard(cardId);
-  uiState.pendingFocusCardId = cardId;
-  uiState.mobileNewCardMode = false;
-  scheduleSave();
-  requestRender();
 }
 
 function nextCardColor() {
@@ -3825,12 +3781,15 @@ function getCanvasFocusPoint() {
 
 function getCanvasFocusRect() {
   const chromeBottom = dom.chrome?.getBoundingClientRect().bottom || 0;
+  const paletteRect = uiState.paletteVisible && !dom.palette.hidden
+    ? dom.palette.getBoundingClientRect()
+    : null;
   const paletteRight =
-    uiState.paletteVisible && !dom.palette.hidden
-      ? dom.palette.getBoundingClientRect().right + 18
+    paletteRect && !isMobileLayout()
+      ? paletteRect.right + 18
       : 0;
   const left = Math.max(0, paletteRight);
-  const top = chromeBottom;
+  const top = Math.max(chromeBottom, paletteRect && isMobileLayout() ? paletteRect.bottom + 8 : 0);
   const right = window.innerWidth;
   const bottom = window.innerHeight;
   return {
