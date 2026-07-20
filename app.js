@@ -55,7 +55,6 @@ const PALETTE = RAW_PALETTE.map((swatch) => ({
 const DISPLAY_PALETTE = PALETTE;
 const TOOL_HINTS = {
   default: "",
-  bucket: "",
   brush: "",
   label: "",
   size: "",
@@ -130,7 +129,9 @@ const uiState = {
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
   labelModalPrimed: false,
-  mobileNewCardMode: false
+  mobileNewCardMode: false,
+  colorTargetPending: false,
+  paletteEditingCardId: null
 };
 
 const interaction = {
@@ -174,6 +175,8 @@ function bindEvents() {
   dom.viewport.addEventListener("wheel", handleWheel, { passive: false });
 
   dom.palette.addEventListener("click", handlePaletteClick);
+  dom.palette.addEventListener("pointerdown", rememberPaletteEditingCard);
+  dom.swatchToggle.addEventListener("pointerdown", rememberPaletteEditingCard);
   dom.swatchToggle.addEventListener("click", togglePaletteVisibility);
   dom.mobileNewCardButton.addEventListener("click", toggleMobileNewCardMode);
   dom.toolButtons.forEach((button) => {
@@ -522,7 +525,26 @@ function handlePaletteClick(event) {
     return;
   }
   uiState.activeColor = button.dataset.color;
+  const editingCardId = uiState.paletteEditingCardId;
+  uiState.paletteEditingCardId = null;
+  if (editingCardId && state.cards[editingCardId] && !state.cards[editingCardId].isLabel) {
+    applyColorToCard(editingCardId, uiState.activeColor);
+    uiState.colorTargetPending = false;
+    setSelectedCard(editingCardId, { skipAutoFit: true });
+    scheduleSave();
+    requestRender();
+  } else {
+    uiState.colorTargetPending = true;
+  }
   syncPalette();
+}
+
+function rememberPaletteEditingCard(event) {
+  const activeBody = document.activeElement?.closest?.(".card-body");
+  uiState.paletteEditingCardId = activeBody?.closest(".note-card")?.dataset.id || null;
+  if (uiState.paletteEditingCardId) {
+    event.preventDefault();
+  }
 }
 
 function syncPalette() {
@@ -607,6 +629,22 @@ function handlePointerDown(event) {
   const gripElement = event.target.closest(".card-grip");
   const bodyElement = event.target.closest(".card-body");
 
+  if (uiState.colorTargetPending) {
+    event.preventDefault();
+    if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
+      applyColorToCard(cardElement.dataset.id, uiState.activeColor);
+      setSelectedCard(cardElement.dataset.id);
+      bringCardForward(cardElement.dataset.id);
+    } else if (!cardElement) {
+      setBoardBackgroundColor(uiState.activeColor);
+      setSelectedCard(null);
+    }
+    uiState.colorTargetPending = false;
+    scheduleSave();
+    requestRender();
+    return;
+  }
+
   if (
     isMobileLayout() &&
     uiState.currentTool === "default" &&
@@ -617,27 +655,6 @@ function handlePointerDown(event) {
       startDraft(event);
     } else {
       startPan(event);
-    }
-    return;
-  }
-
-  if (uiState.currentTool === "bucket") {
-    if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
-      event.preventDefault();
-      applyColorToSubtree(cardElement.dataset.id, uiState.activeColor);
-      bringCardForward(cardElement.dataset.id);
-      setSelectedCard(cardElement.dataset.id);
-      scheduleSave();
-      requestRender();
-    } else if (!cardElement) {
-      event.preventDefault();
-      setBoardBackgroundColor(uiState.activeColor);
-      setSelectedCard(null);
-      scheduleSave();
-      requestRender();
-    } else {
-      setSelectedCard(null);
-      requestRender();
     }
     return;
   }
@@ -908,10 +925,8 @@ function handleKeydown(event) {
   if (event.key === "1") {
     setTool("default");
   } else if (event.key === "2") {
-    setTool("bucket");
-  } else if (event.key === "3") {
     setTool("brush");
-  } else if (event.key === "4") {
+  } else if (event.key === "3") {
     setTool("size");
   }
 }
@@ -2616,6 +2631,13 @@ function applyColorToSubtree(cardId, color) {
       card.color = color;
     }
   });
+}
+
+function applyColorToCard(cardId, color) {
+  const card = state.cards[cardId];
+  if (card && !card.isLabel && isHex(color)) {
+    card.color = color;
+  }
 }
 
 function setBoardBackgroundColor(color) {
