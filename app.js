@@ -1502,9 +1502,7 @@ function createLabelCard(title, seedRootId) {
     id,
     parentId: null,
     x: bounds.x + bounds.w / 2 - width / 2,
-    y: isMobileLayout()
-      ? bounds.y + bounds.h + CARD_GAP * 2
-      : bounds.y - height - CARD_GAP * 2,
+    y: bounds.y - height - CARD_GAP * 2,
     w: width,
     h: height,
     color: state.cards[seedRootId]?.color || LABEL_CARD_FILL,
@@ -1525,9 +1523,8 @@ function createLabelCard(title, seedRootId) {
   };
 
   if (isMobileLayout()) {
-    ensureCardBelowMobileControls(id);
-    resolveMobileCardOverlap(id, { x: 0, y: 1 });
-    ensureCardBelowMobileControls(id);
+    resolveMobileCardOverlap(id, { x: 0, y: -1 });
+    ensureCardSetBelowMobileControls([id, ...memberRootIds]);
   } else {
     resolveCardPlacement(id, { x: 0, y: -1 });
   }
@@ -2540,7 +2537,7 @@ function finishBrush(event) {
     uiState.activeColor = unlinkedColor;
     scheduleSave();
     requestRender();
-    showToast("Cards unlinked — note recolored");
+    showToast("Cards unlinked");
     return;
   }
 
@@ -3267,11 +3264,11 @@ function exportBoardAsCode() {
 }
 
 async function shareBoardBackup() {
-  const filename = `${getExportBaseName()}-${buildExportStamp()}.json`;
+  const filename = `${getExportBaseName()}-${buildExportStamp()}-brain-map-backup.txt`;
   const blob = new Blob([JSON.stringify(serializeStateSnapshot(), null, 2)], {
-    type: "application/json"
+    type: "text/plain;charset=utf-8"
   });
-  const file = new File([blob], filename, { type: "application/json" });
+  const file = new File([blob], filename, { type: "text/plain" });
 
   if (typeof navigator.share === "function" &&
       typeof navigator.canShare === "function" &&
@@ -3280,21 +3277,30 @@ async function shareBoardBackup() {
       await navigator.share({
         files: [file],
         title: `${getBoardTitle()} — Brain Map backup`,
-        text: "Brain Map Code backup. Import this file into Brain Map to restore the board."
+        text: "Import the attached backup into Brain Map to restore the board."
       });
       closeSaveModal();
       showToast("Backup shared");
     } catch (error) {
       if (error?.name !== "AbortError") {
-        showToast("Sharing was not available");
+        downloadAndOpenBackupEmail(blob, filename);
       }
     }
     return;
   }
 
+  downloadAndOpenBackupEmail(blob, filename);
+}
+
+function downloadAndOpenBackupEmail(blob, filename) {
   closeSaveModal();
   downloadBlob(blob, filename);
-  showToast("Backup downloaded — attach it to an email");
+  const subject = encodeURIComponent(`${getBoardTitle()} — Brain Map backup`);
+  const body = encodeURIComponent(
+    `Your Brain Map backup has been downloaded as “${filename}”. Attach that downloaded file to this email, then import it into Brain Map on the other device.`
+  );
+  window.location.href = `mailto:?subject=${subject}&body=${body}`;
+  showToast("Backup downloaded — attach it to the email");
 }
 
 function exportBoardAsText() {
