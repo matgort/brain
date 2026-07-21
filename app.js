@@ -128,6 +128,7 @@ const uiState = {
   paletteVisible: false,
   currentTool: "default",
   pendingLabelRootId: null,
+  pendingLabelEditId: null,
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
   labelModalPrimed: false,
@@ -228,6 +229,7 @@ function bindEvents() {
 
   dom.cardsLayer.addEventListener("focusin", handleCardFocus);
   dom.cardsLayer.addEventListener("dblclick", handleCardDoubleClick);
+  dom.cardsLayer.addEventListener("contextmenu", handleCardContextMenu);
   dom.cardsLayer.addEventListener("input", handleCardInput);
   dom.cardsLayer.addEventListener("paste", handleCardPaste);
 
@@ -742,6 +744,11 @@ function handlePointerDown(event) {
     const labelTargetCard = cardElement || (
       isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY) : null
     );
+    if (labelTargetCard && state.cards[labelTargetCard.dataset.id]?.isLabel) {
+      event.preventDefault();
+      openLabelEditModal(labelTargetCard.dataset.id);
+      return;
+    }
     if (labelTargetCard && !state.cards[labelTargetCard.dataset.id]?.isLabel) {
       event.preventDefault();
       openLabelModal(labelTargetCard.dataset.id);
@@ -1079,6 +1086,18 @@ function handleCardDoubleClick(event) {
   requestRender();
 }
 
+function handleCardContextMenu(event) {
+  const cardElement = event.target.closest(".note-card");
+  const cardId = cardElement?.dataset.id;
+  if (!cardId || !state.cards[cardId]?.isLabel) {
+    return;
+  }
+
+  event.preventDefault();
+  setSelectedCard(cardId);
+  openLabelEditModal(cardId);
+}
+
 function isCollapsibleLabel(cardId) {
   const card = state.cards[cardId];
   return !!card?.isLabel && !!card.labelRootId && getLabelMemberRootIds(cardId).length > 0;
@@ -1414,6 +1433,7 @@ function openLabelModal(cardId) {
 
   closeDeleteModal({ skipRender: true });
   uiState.pendingLabelRootId = rootId;
+  uiState.pendingLabelEditId = null;
   uiState.labelModalPrimed = true;
   uiState.labelModalOpenedAt = Date.now();
   applyLabelModalTheme(rootId);
@@ -1426,8 +1446,30 @@ function openLabelModal(cardId) {
   });
 }
 
+function openLabelEditModal(cardId) {
+  const card = state.cards[cardId];
+  if (!card?.isLabel) {
+    return;
+  }
+
+  closeResetModal();
+  closeSaveModal();
+  uiState.pendingLabelRootId = null;
+  uiState.pendingLabelEditId = cardId;
+  uiState.labelModalPrimed = true;
+  uiState.labelModalOpenedAt = Date.now();
+  dom.labelInput.value = card.text || "";
+  dom.labelModal.hidden = false;
+  window.requestAnimationFrame(() => {
+    uiState.labelModalPrimed = false;
+    dom.labelInput.focus();
+    dom.labelInput.select();
+  });
+}
+
 function closeLabelModal() {
   uiState.pendingLabelRootId = null;
+  uiState.pendingLabelEditId = null;
   uiState.labelModalPrimed = false;
   uiState.labelModalOpenedAt = 0;
   dom.labelModal.hidden = true;
@@ -1455,6 +1497,18 @@ function handleLabelInputKeydown(event) {
 
 function handleLabelSubmit(event) {
   event.preventDefault();
+  const editId = uiState.pendingLabelEditId;
+  if (editId && state.cards[editId]?.isLabel) {
+    state.cards[editId].text = normalizeLabelText(dom.labelInput.value.trim() || "Untitled group");
+    closeLabelModal();
+    setSelectedCard(editId);
+    bringCardForward(editId);
+    scheduleSave();
+    requestRender();
+    showToast("Group title updated");
+    return;
+  }
+
   const rootId = uiState.pendingLabelRootId;
   if (!rootId || !state.cards[rootId]) {
     closeLabelModal();
@@ -1962,10 +2016,13 @@ function getCardCollapseTransform(cardId) {
   const cardRect = getWorldRect(cardId);
   const labelRect = getWorldRect(labelId);
   const cardMid = cardCenter(cardRect);
-  const labelMid = cardCenter(labelRect);
-  const dx = labelMid.x - cardMid.x;
-  const dy = labelMid.y - cardMid.y;
-  return `translate(${dx}px, ${dy}px) scale(0.14)`;
+  const labelExit = {
+    x: labelRect.x + labelRect.w / 2,
+    y: labelRect.y + labelRect.h + 5
+  };
+  const dx = labelExit.x - cardMid.x;
+  const dy = labelExit.y - cardMid.y;
+  return `translate(${dx}px, ${dy}px) scale(0.34, 0.08)`;
 }
 
 function getVisibleCardIds() {
