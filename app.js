@@ -724,7 +724,7 @@ function handlePointerDown(event) {
 
   if (uiState.currentTool === "brush") {
     const brushStartCard = cardElement || (
-      isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY) : null
+      isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY, null, 44) : null
     );
     if (brushStartCard && !state.cards[brushStartCard.dataset.id]?.isLabel) {
       event.preventDefault();
@@ -2457,7 +2457,8 @@ function startBrush(event, cardId) {
   interaction.brush = {
     sourceId,
     points: [start],
-    currentPoint: pointer
+    currentPoint: pointer,
+    snapTargetId: null
   };
   setSelectedCard(cardId);
   requestRender();
@@ -2468,10 +2469,26 @@ function updateBrush(event) {
     return;
   }
   const pointerScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
-  const point = screenToWorld(pointerScreen);
+  const rawPoint = screenToWorld(pointerScreen);
+  const snapTarget = isMobileLayout()
+    ? getCardNearScreenPoint(event.clientX, event.clientY, interaction.brush.sourceId, 64)
+    : null;
+  interaction.brush.snapTargetId = snapTarget?.dataset.id
+    ? getRootId(snapTarget.dataset.id)
+    : null;
+  const previousPoint = interaction.brush.currentPoint || rawPoint;
+  const point = snapTarget
+    ? cardCenter(getWorldRect(snapTarget.dataset.id))
+    : isMobileLayout()
+      ? {
+          x: previousPoint.x + (rawPoint.x - previousPoint.x) * 0.42,
+          y: previousPoint.y + (rawPoint.y - previousPoint.y) * 0.42
+        }
+      : rawPoint;
   interaction.brush.currentPoint = point;
   const last = interaction.brush.points[interaction.brush.points.length - 1];
-  if (!last || distanceBetween(last, point) > 8 / state.camera.scale) {
+  const pointSpacing = (isMobileLayout() ? 12 : 8) / state.camera.scale;
+  if (!last || distanceBetween(last, point) > pointSpacing) {
     interaction.brush.points.push(point);
   } else if (interaction.brush.points.length === 1) {
     interaction.brush.points.push(point);
@@ -2492,10 +2509,11 @@ function finishBrush(event) {
     return;
   }
 
+  const snappedTarget = brush.snapTargetId ? cardElements.get(brush.snapTargetId) : null;
   const exactTarget = document.elementFromPoint(event.clientX, event.clientY)?.closest(".note-card");
-  const targetElement = exactTarget || (
+  const targetElement = snappedTarget || exactTarget || (
     isMobileLayout()
-      ? getCardNearScreenPoint(event.clientX, event.clientY, brush.sourceId, 38)
+      ? getCardNearScreenPoint(event.clientX, event.clientY, brush.sourceId, 72)
       : null
   );
   const targetId = targetElement?.dataset.id ? getRootId(targetElement.dataset.id) : null;
@@ -2514,17 +2532,13 @@ function finishBrush(event) {
   });
   if (existingConnectionIndex >= 0) {
     state.connections.splice(existingConnectionIndex, 1);
-    let unlinkedColor = nextCardColor();
     const previousColor = state.cards[targetId]?.color;
-    let attempts = 0;
-    while (unlinkedColor === previousColor && attempts < DISPLAY_PALETTE.length) {
-      unlinkedColor = nextCardColor();
-      attempts += 1;
-    }
+    const unlinkedColor = getRandomDifferentNoteColor(previousColor);
     applyColorToSubtree(targetId, unlinkedColor);
+    uiState.activeColor = unlinkedColor;
     scheduleSave();
     requestRender();
-    showToast("Cards unlinked");
+    showToast("Cards unlinked — note recolored");
     return;
   }
 
@@ -2534,6 +2548,16 @@ function finishBrush(event) {
   upsertConnection(brush.sourceId, targetId, simplifyPathPoints(brush.points), sharedColor);
   scheduleSave();
   requestRender();
+}
+
+function getRandomDifferentNoteColor(previousColor) {
+  const choices = DISPLAY_PALETTE
+    .map((swatch) => swatch.fill)
+    .filter((color) => color !== previousColor);
+  if (choices.length === 0) {
+    return PALETTE[0].fill;
+  }
+  return choices[Math.floor(Math.random() * choices.length)];
 }
 
 function upsertConnection(fromId, toId, points, color) {
