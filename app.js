@@ -3264,7 +3264,7 @@ function exportBoardAsCode() {
 }
 
 async function shareBoardBackup() {
-  const filename = `${getExportBaseName()}-${buildExportStamp()}-brain-map-backup.txt`;
+  const filename = `${getExportBaseName()}-${buildExportStamp()}-brain-map-code-backup.txt`;
   const blob = new Blob([JSON.stringify(serializeStateSnapshot(), null, 2)], {
     type: "text/plain;charset=utf-8"
   });
