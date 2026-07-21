@@ -90,6 +90,7 @@ const dom = {
   saveImageButton: document.getElementById("saveImageButton"),
   saveTextButton: document.getElementById("saveTextButton"),
   saveCodeButton: document.getElementById("saveCodeButton"),
+  saveShareButton: document.getElementById("saveShareButton"),
   saveCancelButton: document.getElementById("saveCancelButton"),
   boardTitleInput: document.getElementById("boardTitleInput"),
   labelModal: document.getElementById("labelModal"),
@@ -215,6 +216,7 @@ function bindEvents() {
   dom.saveImageButton.addEventListener("click", exportBoardAsImage);
   dom.saveTextButton.addEventListener("click", exportBoardAsText);
   dom.saveCodeButton.addEventListener("click", exportBoardAsCode);
+  dom.saveShareButton.addEventListener("click", shareBoardBackup);
   dom.saveCancelButton.addEventListener("click", closeSaveModal);
   dom.boardTitleInput.addEventListener("input", handleBoardTitleInput);
   dom.saveModal.addEventListener("click", handleSaveModalClick);
@@ -3262,6 +3264,37 @@ function exportBoardAsCode() {
   });
   downloadBlob(blob, `${getExportBaseName()}-${buildExportStamp()}.json`);
   showToast("Code backup downloaded");
+}
+
+async function shareBoardBackup() {
+  const filename = `${getExportBaseName()}-${buildExportStamp()}.json`;
+  const blob = new Blob([JSON.stringify(serializeStateSnapshot(), null, 2)], {
+    type: "application/json"
+  });
+  const file = new File([blob], filename, { type: "application/json" });
+
+  if (typeof navigator.share === "function" &&
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({
+        files: [file],
+        title: `${getBoardTitle()} — Brain Map backup`,
+        text: "Brain Map Code backup. Import this file into Brain Map to restore the board."
+      });
+      closeSaveModal();
+      showToast("Backup shared");
+    } catch (error) {
+      if (error?.name !== "AbortError") {
+        showToast("Sharing was not available");
+      }
+    }
+    return;
+  }
+
+  closeSaveModal();
+  downloadBlob(blob, filename);
+  showToast("Backup downloaded — attach it to an email");
 }
 
 function exportBoardAsText() {
