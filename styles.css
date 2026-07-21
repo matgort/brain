@@ -328,7 +328,7 @@ textarea {
 
 .note-card {
   position: absolute;
-  min-width: 72px;
+  min-width: 40px;
   min-height: 56px;
   overflow: hidden;
   border: 0;

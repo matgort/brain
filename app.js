@@ -1,6 +1,7 @@
 const STORAGE_KEY = "brainstorm-canvas-v1";
-const MIN_CARD_WIDTH = 140;
+const MIN_CARD_WIDTH = 40;
 const MIN_CARD_HEIGHT = 92;
+const MIN_DRAW_GESTURE = 10;
 const MAX_NOTE_CARD_WIDTH = 270;
 const MAX_LABEL_CARD_WIDTH = 500;
 const MAX_RESIZED_NOTE_WIDTH = 960;
@@ -2089,7 +2090,7 @@ function finishDraft() {
   }
 
   const rect = normalizeRect(draft.startWorld, draft.currentWorld);
-  if (rect.w < MIN_CARD_WIDTH || rect.h < MIN_CARD_HEIGHT) {
+  if (rect.w < MIN_DRAW_GESTURE || rect.h < MIN_DRAW_GESTURE) {
     requestRender();
     return;
   }
@@ -2703,7 +2704,7 @@ function createCard(rect) {
     x: rect.x,
     y: rect.y,
     w: Math.max(MIN_CARD_WIDTH, rect.w),
-    h: rect.h,
+    h: Math.max(MIN_CARD_HEIGHT, rect.h),
     color,
     isLabel: false,
     labelRootId: null,
@@ -2770,7 +2771,7 @@ function setCardWorldRect(cardId, rect) {
   card.x = rect.x - parentRect.x;
   card.y = rect.y - parentRect.y;
   card.w = card.isLabel
-    ? clamp(rect.w, MIN_CARD_WIDTH, MAX_LABEL_CARD_WIDTH)
+    ? clamp(rect.w, LABEL_CARD_MIN_WIDTH, MAX_LABEL_CARD_WIDTH)
     : Math.max(MIN_CARD_WIDTH, rect.w);
   if (!card.isLabel) {
     card.widthCap = Math.max(toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH), card.w);
