@@ -25,7 +25,7 @@ Then open `http://127.0.0.1:4173`.
 - On mobile, tap `New Card` and drag a rectangle on empty canvas. Otherwise, a one-finger swipe on empty canvas pans; pinch with two fingers to zoom.
 - On mobile, `Swatch` toggles a horizontal row of square color choices below the controls.
 - Hold Space and drag to pan, or drag any card edge to move a card.
-- Choose a `Swatch`, then tap a note to recolor it or empty canvas to recolor the background. When a note is actively being edited, choosing a swatch recolors it immediately.
+- Choose a `Swatch`, then tap an individual note to recolor only that note, a group title to recolor every card in that group, or empty canvas to recolor the background. When a note is actively being edited, choosing a swatch recolors it immediately.
 - `Link` tool: draw a freehand line or small picture from one stack to another. The drawing stays attached and warps when either note moves. Draw between the same directly connected notes again to unlink them; the destination note receives a new random color.
 - Drag a group label to move the full group; drag an individual note to rearrange only that note.
 - `Label` tool: click a note to name its connected group.

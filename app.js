@@ -694,10 +694,15 @@ function handlePointerDown(event) {
 
   if (uiState.colorTargetPending) {
     event.preventDefault();
-    if (cardElement && !state.cards[cardElement.dataset.id]?.isLabel) {
-      applyColorToCard(cardElement.dataset.id, uiState.activeColor);
-      setSelectedCard(cardElement.dataset.id);
-      bringCardForward(cardElement.dataset.id);
+    if (cardElement) {
+      const cardId = cardElement.dataset.id;
+      if (state.cards[cardId]?.isLabel) {
+        applyColorToLabelGroup(cardId, uiState.activeColor);
+      } else {
+        applyColorToCard(cardId, uiState.activeColor);
+      }
+      setSelectedCard(cardId);
+      bringCardForward(cardId);
     } else if (!cardElement) {
       setBoardBackgroundColor(uiState.activeColor);
       setSelectedCard(null);
@@ -3257,8 +3262,24 @@ function applyColorToCard(cardId, color) {
   const card = state.cards[cardId];
   if (card && !card.isLabel && isHex(color)) {
     card.color = color;
-    syncLabelColorsForCard(cardId, color);
   }
+}
+
+function applyColorToLabelGroup(labelId, color) {
+  const label = state.cards[labelId];
+  if (!label?.isLabel || !isHex(color)) {
+    return;
+  }
+
+  label.color = color;
+  getLabelMemberRootIds(labelId).forEach((rootId) => {
+    [rootId, ...getDescendants(rootId)].forEach((cardId) => {
+      const card = state.cards[cardId];
+      if (card && !card.isLabel) {
+        card.color = color;
+      }
+    });
+  });
 }
 
 function syncLabelColorsForCard(cardId, color) {
