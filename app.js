@@ -1,4 +1,5 @@
 const STORAGE_KEY = "brainstorm-canvas-v1";
+const EXPORT_SEQUENCE_KEY = "brainstorm-export-sequence-v1";
 const MIN_CARD_WIDTH = 40;
 const MIN_CARD_HEIGHT = 92;
 const MIN_DRAW_GESTURE = 10;
@@ -3560,7 +3561,38 @@ function wipeBoard() {
 }
 
 function buildExportStamp() {
-  return new Date().toISOString().replace(/[:.]/g, "-");
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const dayKey = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const months = [
+    "jan", "feb", "mar", "apr", "may", "jun",
+    "jul", "aug", "sep", "oct", "nov", "dec"
+  ];
+  let sequence = 0;
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(EXPORT_SEQUENCE_KEY) || "null");
+    sequence = saved?.day === dayKey && Number.isInteger(saved.count) ? saved.count : 0;
+    localStorage.setItem(
+      EXPORT_SEQUENCE_KEY,
+      JSON.stringify({ day: dayKey, count: sequence + 1 })
+    );
+  } catch (error) {
+    console.warn("Could not update the export filename sequence.", error);
+  }
+
+  const date = `${months[now.getMonth()]}-${pad(now.getDate())}-${String(now.getFullYear()).slice(-2)}`;
+  return `${date}-${getExportSequenceLetter(sequence)}`;
+}
+
+function getExportSequenceLetter(index) {
+  let value = Math.max(0, index);
+  let letters = "";
+  do {
+    letters = String.fromCharCode(65 + (value % 26)) + letters;
+    value = Math.floor(value / 26) - 1;
+  } while (value >= 0);
+  return letters;
 }
 
 function getBoardTitle() {
@@ -3569,8 +3601,7 @@ function getBoardTitle() {
 
 function getExportBaseName() {
   const slug = getBoardTitle()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/[^a-z0-9]+/gi, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);
   return slug || "brainstorm-board";
@@ -3589,17 +3620,41 @@ function downloadBlob(blob, filename) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function exportBoardAsCode() {
+async function exportBoardAsCode() {
   closeSaveModal();
   const blob = new Blob([JSON.stringify(serializeStateSnapshot(), null, 2)], {
     type: "application/json"
   });
-  downloadBlob(blob, `${getExportBaseName()}-${buildExportStamp()}.json`);
+  const filename = `${getExportBaseName()}-${buildExportStamp()}.json`;
+
+  if (typeof window.showSaveFilePicker === "function") {
+    try {
+      const fileHandle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: "Brain Map Code backup",
+          accept: { "application/json": [".json"] }
+        }]
+      });
+      const writable = await fileHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      showToast("Code backup saved");
+      return;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        return;
+      }
+      console.warn("Could not open the Save As picker.", error);
+    }
+  }
+
+  downloadBlob(blob, filename);
   showToast("Code backup downloaded");
 }
 
 async function shareBoardBackup() {
-  const filename = `${getExportBaseName()}-${buildExportStamp()}-brain-map-code-backup.txt`;
+  const filename = `${getExportBaseName()}-${buildExportStamp()}.txt`;
   const blob = new Blob([JSON.stringify(serializeStateSnapshot(), null, 2)], {
     type: "text/plain;charset=utf-8"
   });
