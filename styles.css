@@ -339,8 +339,16 @@ textarea {
   transform-origin: center center;
   will-change: transform, opacity;
   transition:
-    transform 620ms cubic-bezier(0.22, 0.72, 0.18, 1),
-    opacity 480ms cubic-bezier(0.3, 0, 0.2, 1),
+    transform 280ms cubic-bezier(0.16, 1, 0.3, 1) var(--expand-delay, 0ms),
+    opacity 0s linear var(--expand-delay, 0ms),
+    box-shadow 180ms ease;
+}
+
+.note-card.is-sucked-in {
+  opacity: 0;
+  transition:
+    transform 280ms cubic-bezier(0.16, 1, 0.3, 1) var(--collapse-delay, 0ms),
+    opacity 0s linear calc(var(--collapse-delay, 0ms) + 280ms),
     box-shadow 180ms ease;
 }
 
@@ -369,6 +377,19 @@ textarea {
   text-transform: uppercase;
   cursor: pointer;
   transform: none;
+}
+
+.note-card.is-label,
+.note-card.is-label .card-body {
+  cursor: pointer;
+}
+
+.note-card.is-label .card-grip {
+  cursor: grab;
+}
+
+.note-card.is-label .card-grip:active {
+  cursor: grabbing;
 }
 
 .card-grip {
@@ -489,6 +510,15 @@ body[data-tool="default"] .viewport {
 
 body[data-tool="default"] .note-card .card-body {
   cursor: text;
+}
+
+body[data-tool="default"] .note-card.is-label,
+body[data-tool="default"] .note-card.is-label .card-body {
+  cursor: pointer;
+}
+
+body[data-tool="default"] .note-card.is-label .card-grip {
+  cursor: grab;
 }
 
 body[data-tool="brush"] .viewport {
@@ -703,16 +733,17 @@ body.is-space-panning .viewport {
 
 .connection-path {
   fill: none;
+  stroke: #000;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-width: 4;
-  opacity: 0.72;
+  stroke-width: 1;
+  opacity: 1;
 }
 
 .connection-preview {
   fill: none;
-  stroke: rgba(70, 66, 61, 0.74);
-  stroke-width: 4;
+  stroke: #000;
+  stroke-width: 1;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-dasharray: 12 8;

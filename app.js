@@ -8,7 +8,6 @@ const MAX_RESIZED_NOTE_WIDTH = 960;
 const MAX_RESIZED_NOTE_HEIGHT = 720;
 const MAX_NOTE_FONT_SCALE = 4;
 const MIN_NOTE_FONT_SCALE = 0.75;
-const SIZE_TOOL_SENSITIVITY = 0.0034;
 const FIT_CARD_MIN_WIDTH = MIN_CARD_WIDTH;
 const FIT_CARD_MIN_HEIGHT = MIN_CARD_HEIGHT;
 const LABEL_CARD_MIN_WIDTH = 120;
@@ -17,6 +16,10 @@ const CARD_TEXT_INSET_X = 16;
 const CARD_TEXT_INSET_Y = 15;
 const ZOOM_LIMITS = { min: 0.35, max: 2.8 };
 const CARD_GAP = 18;
+const LABEL_GROUP_GAP = 10;
+const NEW_CARD_GAP = 6;
+const GROUP_ANIMATION_DURATION_MS = 280;
+const GROUP_ANIMATION_STEP_MS = 235;
 const EXPORT_PADDING = 44;
 const DEFAULT_BACKGROUND_COLOR = "#d7d7d7";
 const NOTE_CARD_INK = "#000000";
@@ -54,14 +57,6 @@ const PALETTE = RAW_PALETTE.map((swatch) => ({
   ink: getReadableInk(swatch.fill)
 }));
 const DISPLAY_PALETTE = PALETTE;
-const TOOL_HINTS = {
-  default: "",
-  brush: "",
-  label: "",
-  size: "",
-  delete: ""
-};
-
 const dom = {
   chrome: document.getElementById("chrome"),
   viewport: document.getElementById("viewport"),
@@ -100,7 +95,6 @@ const dom = {
   toast: document.getElementById("toast"),
   toastMessage: document.getElementById("toastMessage"),
   toastAction: document.getElementById("toastAction"),
-  toolHint: document.getElementById("toolHint"),
   resetView: document.getElementById("resetView"),
   titleButton: document.getElementById("titleButton"),
   titleModal: document.getElementById("titleModal"),
@@ -135,7 +129,10 @@ const uiState = {
   labelModalOpenedAt: 0,
   mobileNewCardMode: false,
   colorTargetPending: false,
-  paletteEditingCardId: null
+  paletteEditingCardId: null,
+  groupAnimation: null,
+  groupAnimationSequence: 0,
+  groupDisplacementSnapshots: new Map()
 };
 
 const interaction = {
@@ -146,7 +143,6 @@ const interaction = {
   pan: null,
   drag: null,
   resize: null,
-  scale: null,
   brush: null,
   gesture: null
 };
@@ -441,6 +437,9 @@ function scheduleSave() {
 
 function saveNow() {
   window.clearTimeout(saveTimer);
+  if (uiState.groupAnimation) {
+    return;
+  }
   saveState();
 }
 
@@ -494,9 +493,6 @@ function applyToolState() {
   });
   dom.mobileNewCardButton.classList.toggle("is-active", uiState.mobileNewCardMode);
   dom.mobileNewCardButton.setAttribute("aria-pressed", uiState.mobileNewCardMode ? "true" : "false");
-  if (dom.toolHint) {
-    dom.toolHint.textContent = TOOL_HINTS[uiState.currentTool] || "";
-  }
   syncTextToolbar();
 }
 
@@ -509,7 +505,7 @@ function toggleTool(tool) {
 }
 
 function setTool(tool) {
-  if (!(tool in TOOL_HINTS)) {
+  if (!["default", "brush", "label", "size", "delete"].includes(tool)) {
     return;
   }
   cancelActiveInteraction();
@@ -863,12 +859,6 @@ function handlePointerMove(event) {
     return;
   }
 
-  if (interaction.mode === "scale-card") {
-    event.preventDefault();
-    updateCardScale(event);
-    return;
-  }
-
   if (interaction.mode === "brush") {
     event.preventDefault();
     updateBrush(event);
@@ -898,8 +888,6 @@ function handlePointerUp(event) {
       finishCardDrag(event);
     } else if (interaction.mode === "resize-card") {
       finishCardResize();
-    } else if (interaction.mode === "scale-card") {
-      finishCardScale();
     } else if (interaction.mode === "brush") {
       finishBrush(event);
     }
@@ -1113,7 +1101,7 @@ function openDeleteModal(cardId) {
   closeLabelModal();
   uiState.pendingDeleteCardId = cardId;
   setSelectedCard(cardId);
-  applyPopupTheme(dom.deleteModal);
+  applyPopupTheme(dom.deleteModal, state.cards[cardId].color);
   dom.deleteModal.hidden = false;
   dom.deleteConfirmButton.focus();
   requestRender();
@@ -1175,6 +1163,20 @@ function deleteCardAndRelated(cardId) {
       return !!candidate && !candidate.isLabel && !candidate.parentId;
     })
   );
+  const connectionRepairGroups = Array.from(removedRootIds).map((rootId) => ({
+    rootId,
+    neighborIds: uniqueExistingCardIds(
+      state.connections.flatMap((connection) => {
+        if (connection.fromId === rootId) {
+          return [getRootId(connection.toId)];
+        }
+        if (connection.toId === rootId) {
+          return [getRootId(connection.fromId)];
+        }
+        return [];
+      })
+    ).filter((neighborId) => !removedCardIdSet.has(neighborId))
+  }));
 
   removedCardIds.forEach((id) => {
     delete state.cards[id];
@@ -1189,6 +1191,22 @@ function deleteCardAndRelated(cardId) {
     );
   });
 
+  connectionRepairGroups.forEach(({ neighborIds }) => {
+    const survivingNeighborIds = neighborIds.filter((neighborId) => {
+      const neighbor = state.cards[neighborId];
+      return !!neighbor && !neighbor.isLabel && !neighbor.parentId;
+    });
+    const hubId = survivingNeighborIds[0];
+    survivingNeighborIds.slice(1).forEach((neighborId) => {
+      upsertConnection(
+        hubId,
+        neighborId,
+        [],
+        state.cards[hubId]?.color || state.cards[neighborId]?.color || PALETTE[0].fill
+      );
+    });
+  });
+
   labelSnapshots.forEach((snapshot) => {
     const label = state.cards[snapshot.id];
     if (!label?.isLabel) {
@@ -1200,6 +1218,7 @@ function deleteCardAndRelated(cardId) {
     });
     if (survivingMemberRootIds.length === 0) {
       delete state.cards[snapshot.id];
+      uiState.groupDisplacementSnapshots.delete(snapshot.id);
       removedCardIdSet.add(snapshot.id);
       return;
     }
@@ -1211,6 +1230,7 @@ function deleteCardAndRelated(cardId) {
     ) {
       label.labelRootId = survivingMemberRootIds[0];
     }
+    label.color = state.cards[label.labelRootId].color;
     label.text = normalizeLabelText(label.text);
   });
 
@@ -1223,18 +1243,12 @@ function deleteCardAndRelated(cardId) {
   if (uiState.pendingLabelRootId && removedRootIds.has(uiState.pendingLabelRootId)) {
     uiState.pendingLabelRootId = null;
   }
+  if (uiState.pendingLabelEditId && removedCardIdSet.has(uiState.pendingLabelEditId)) {
+    uiState.pendingLabelEditId = null;
+  }
   if (uiState.pendingDeleteCardId && removedCardIdSet.has(uiState.pendingDeleteCardId)) {
     uiState.pendingDeleteCardId = null;
   }
-}
-
-function getCardAtPoint(clientX, clientY, excludedId = null) {
-  const match = document
-    .elementsFromPoint(clientX, clientY)
-    .map((element) => element.closest?.(".note-card"))
-    .find((element) => element?.dataset.id && element.dataset.id !== excludedId);
-
-  return match?.dataset.id || null;
 }
 
 function getLabelMemberRootIds(labelId) {
@@ -1292,10 +1306,146 @@ function moveCardSetBy(cardIds, deltaX, deltaY) {
   shiftConnectionPathsForMovedRoots(cardIds, deltaX, deltaY);
 }
 
-function resolveCardSetPlacement(cardIds, motion = { x: 0, y: 0 }) {
-  uniqueExistingCardIds(cardIds).forEach((cardId) => {
-    resolveCardPlacement(cardId, motion);
+function pushCardsClearOfNewCard(cardId) {
+  if (!state.cards[cardId]) {
+    return;
+  }
+  const pushedSurfaceIds = new Set(getCollisionSurfaceCardIds([cardId]));
+  const queue = [...pushedSurfaceIds];
+  let safety = 0;
+
+  while (queue.length > 0 && safety < 240) {
+    safety += 1;
+    const anchorId = queue.shift();
+    if (!state.cards[anchorId]) {
+      continue;
+    }
+    const anchorRect = getWorldRect(anchorId);
+    const obstacle = Object.values(state.cards).find((candidate) => {
+      if (
+        pushedSurfaceIds.has(candidate.id) ||
+        isHiddenByCollapsedAncestor(candidate.id)
+      ) {
+        return false;
+      }
+      return rectsOverlapWithGap(anchorRect, getWorldRect(candidate.id), NEW_CARD_GAP);
+    });
+    if (!obstacle) {
+      continue;
+    }
+
+    const obstacleRect = getWorldRect(obstacle.id);
+    const shift = getSmallestCollisionShift(anchorRect, obstacleRect, NEW_CARD_GAP);
+    moveCardSetBy([obstacle.id], shift.x, shift.y);
+    getCollisionSurfaceCardIds([obstacle.id]).forEach((id) => {
+      pushedSurfaceIds.add(id);
+      queue.push(id);
+    });
+    queue.push(anchorId);
+  }
+}
+
+function getSmallestCollisionShift(anchorRect, obstacleRect, gap) {
+  return [
+    { x: anchorRect.x - gap - (obstacleRect.x + obstacleRect.w), y: 0 },
+    { x: anchorRect.x + anchorRect.w + gap - obstacleRect.x, y: 0 },
+    { x: 0, y: anchorRect.y - gap - (obstacleRect.y + obstacleRect.h) },
+    { x: 0, y: anchorRect.y + anchorRect.h + gap - obstacleRect.y }
+  ].sort((left, right) => Math.hypot(left.x, left.y) - Math.hypot(right.x, right.y))[0];
+}
+
+function pushCardsFromDrag(movingCardIds, deltaX, deltaY, protectedCardIds = []) {
+  if ((!deltaX && !deltaY) || movingCardIds.length === 0) {
+    return;
+  }
+
+  const lockedIds = new Set(uniqueExistingCardIds(movingCardIds));
+  const pushedIds = new Set(lockedIds);
+  const protectedIds = new Set(uniqueExistingCardIds(protectedCardIds));
+  const pushedSurfaceIds = new Set(getCollisionSurfaceCardIds([...pushedIds]));
+  const protectedSurfaceIds = new Set(getCollisionSurfaceCardIds([...protectedIds]));
+  const queue = [...pushedSurfaceIds];
+  let safety = 0;
+
+  while (queue.length > 0 && safety < 240) {
+    safety += 1;
+    const movingId = queue.shift();
+    if (!state.cards[movingId]) {
+      continue;
+    }
+    const movingBounds = getWorldRect(movingId);
+    const movingSetIds = new Set(getDragTargetCardIds(movingId));
+    const obstacle = Object.values(state.cards).find((candidate) => {
+      if (
+        candidate.id === movingId ||
+        movingSetIds.has(candidate.id) ||
+        lockedIds.has(candidate.id) ||
+        protectedIds.has(candidate.id) ||
+        protectedSurfaceIds.has(candidate.id) ||
+        isDescendant(candidate.id, movingId) ||
+        isDescendant(movingId, candidate.id) ||
+        (!candidate.isLabel && !state.cards[movingId]?.isLabel && getRootId(candidate.id) === getRootId(movingId)) ||
+        isHiddenByCollapsedAncestor(candidate.id)
+      ) {
+        return false;
+      }
+      return rectsOverlapWithGap(movingBounds, getWorldRect(candidate.id), CARD_GAP);
+    });
+    if (!obstacle) {
+      continue;
+    }
+
+    let obstacleIds = getDragTargetCardIds(obstacle.id);
+    if (obstacle.isLabel && obstacleIds.some((id) => pushedIds.has(id))) {
+      obstacleIds = [obstacle.id];
+    }
+    obstacleIds = uniqueExistingCardIds(obstacleIds).filter((id) =>
+      !lockedIds.has(id) && !protectedIds.has(id) && !movingSetIds.has(id)
+    );
+    if (obstacleIds.length === 0) {
+      continue;
+    }
+
+    const obstacleBounds = getWorldRect(obstacle.id);
+    const shift = getCollisionShift(
+      movingBounds,
+      obstacleBounds,
+      { x: deltaX, y: deltaY }
+    );
+    moveCardSetBy(obstacleIds, shift.x, shift.y);
+    obstacleIds.forEach((id) => {
+      pushedIds.add(id);
+    });
+    getCollisionSurfaceCardIds(obstacleIds).forEach((id) => {
+      pushedSurfaceIds.add(id);
+      queue.push(id);
+    });
+    queue.push(movingId);
+  }
+}
+
+function getCollisionSurfaceCardIds(cardIds) {
+  return uniqueExistingCardIds(cardIds).flatMap((cardId) => {
+    const card = state.cards[cardId];
+    if (!card || card.isLabel || card.collapsed) {
+      return [cardId];
+    }
+    return [cardId, ...getDescendants(cardId)].filter((id) =>
+      !isHiddenByCollapsedAncestor(id)
+    );
   });
+}
+
+function moveDraggedCardsWithPush(cardIds, deltaX, deltaY) {
+  const distance = Math.hypot(deltaX, deltaY);
+  const maxStep = 12 / state.camera.scale;
+  const steps = Math.max(1, Math.min(48, Math.ceil(distance / maxStep)));
+  const stepX = deltaX / steps;
+  const stepY = deltaY / steps;
+  for (let step = 0; step < steps; step += 1) {
+    moveCardSetBy(cardIds, stepX, stepY);
+    pushCardsFromDrag(cardIds, stepX, stepY);
+  }
 }
 
 function resolveMobileCardOverlap(cardId, motion = { x: 0, y: 0 }, movingCardIds = [cardId]) {
@@ -1525,20 +1675,8 @@ function handleLabelSubmit(event) {
   setSelectedCard(labelId);
   bringCardForward(labelId);
   setTool("default");
-  centerLabelGroupView(labelId);
   scheduleSave();
   requestRender();
-}
-
-function centerLabelGroupView(labelId) {
-  const label = state.cards[labelId];
-  if (!label?.isLabel) {
-    return;
-  }
-  const memberRootIds = getLabelMemberRootIds(labelId);
-  const bounds = getBoundsForCardIds([labelId, ...memberRootIds]);
-  dom.viewport.focus({ preventScroll: true });
-  centerBoundsInCanvas(bounds);
 }
 
 function createLabelCard(title, seedRootId) {
@@ -1551,12 +1689,20 @@ function createLabelCard(title, seedRootId) {
   const width = LABEL_CARD_MIN_WIDTH;
   const height = LABEL_CARD_MIN_HEIGHT;
   const id = `card-${state.nextId++}`;
+  let labelY = bounds.y - height - LABEL_GROUP_GAP;
+
+  if (isMobileLayout()) {
+    const screenTop = worldToScreen({ x: bounds.x, y: labelY }).y;
+    if (screenTop < getMobileCanvasTop()) {
+      labelY = bounds.y + bounds.h + LABEL_GROUP_GAP;
+    }
+  }
 
   state.cards[id] = {
     id,
     parentId: null,
     x: bounds.x + bounds.w / 2 - width / 2,
-    y: bounds.y - height - CARD_GAP * 2,
+    y: labelY,
     w: width,
     h: height,
     color: state.cards[seedRootId]?.color || LABEL_CARD_FILL,
@@ -1576,12 +1722,7 @@ function createLabelCard(title, seedRootId) {
     order: state.nextOrder++
   };
 
-  if (isMobileLayout()) {
-    resolveMobileCardOverlap(id, { x: 0, y: -1 });
-    ensureCardSetBelowMobileControls([id, ...memberRootIds]);
-  } else {
-    resolveCardPlacement(id, { x: 0, y: -1 });
-  }
+  ensureCardBelowMobileControls(id);
   return id;
 }
 
@@ -1590,10 +1731,245 @@ function toggleLabelCollapse(cardId) {
   if (!card || !isCollapsibleLabel(cardId)) {
     return;
   }
-  card.collapsed = !card.collapsed;
+  completeActiveGroupAnimation();
+  window.clearTimeout(saveTimer);
+  saveState();
+  const collapsing = !card.collapsed;
+  if (!collapsing) {
+    uiState.groupDisplacementSnapshots.set(cardId, captureExternalCardPositions(cardId));
+  }
+  card.collapsed = collapsing;
+  uiState.groupAnimation = {
+    token: ++uiState.groupAnimationSequence,
+    labelId: cardId,
+    collapsing: card.collapsed,
+    startedAt: Date.now(),
+    previousRects: new Map(),
+    restoreEntries: collapsing ? getGroupRestoreEntries(cardId) : []
+  };
+  const animationToken = uiState.groupAnimation.token;
+  const memberRootIds = getLabelMemberRootIds(cardId);
+  const memberIds = memberRootIds.flatMap((rootId) => [rootId, ...getDescendants(rootId)]);
+  const maxDepth = Math.max(
+    1,
+    ...memberIds.map((memberId) => getCardCollapseDepth(memberId, cardId))
+  );
+  const groupMotionDuration =
+    Math.max(0, maxDepth - 1) * GROUP_ANIMATION_STEP_MS + GROUP_ANIMATION_DURATION_MS;
+  const returnDuration = collapsing && uiState.groupAnimation.restoreEntries.length > 0
+    ? GROUP_ANIMATION_DURATION_MS
+    : 0;
+  uiState.groupAnimation.groupMotionDuration = groupMotionDuration;
+  uiState.groupAnimation.returnDuration = returnDuration;
+  const totalAnimationDuration = groupMotionDuration + returnDuration;
+  window.setTimeout(() => {
+    if (uiState.groupAnimation?.token !== animationToken) {
+      return;
+    }
+    completeActiveGroupAnimation();
+    scheduleSave();
+    requestRender();
+  }, totalAnimationDuration);
+  runGroupAnimationFrames(animationToken, Date.now() + totalAnimationDuration);
   setSelectedCard(cardId);
-  scheduleSave();
   requestRender();
+}
+
+function completeActiveGroupAnimation() {
+  const animation = uiState.groupAnimation;
+  if (!animation) {
+    return;
+  }
+  if (!animation.collapsing) {
+    pushCardsFromUnfurl(animation, true);
+    finalizeGroupDisplacementSnapshot(animation.labelId);
+  } else {
+    restoreDisplacedCards(animation, 1);
+    uiState.groupDisplacementSnapshots.delete(animation.labelId);
+  }
+  uiState.groupAnimation = null;
+}
+
+function runGroupAnimationFrames(animationToken, endTime) {
+  if (uiState.groupAnimation?.token !== animationToken || Date.now() >= endTime) {
+    return;
+  }
+  if (!uiState.groupAnimation.collapsing) {
+    pushCardsFromUnfurl(uiState.groupAnimation);
+  } else {
+    const returnElapsed = Date.now() - uiState.groupAnimation.startedAt -
+      uiState.groupAnimation.groupMotionDuration;
+    if (returnElapsed >= 0 && uiState.groupAnimation.returnDuration > 0) {
+      const progress = clamp(
+        returnElapsed / uiState.groupAnimation.returnDuration,
+        0,
+        1
+      );
+      restoreDisplacedCards(uiState.groupAnimation, progress);
+    }
+  }
+  requestRender();
+  window.requestAnimationFrame(() => runGroupAnimationFrames(animationToken, endTime));
+}
+
+function captureExternalCardPositions(labelId) {
+  const groupIds = new Set([
+    labelId,
+    ...getLabelMemberRootIds(labelId).flatMap((rootId) => [rootId, ...getDescendants(rootId)])
+  ]);
+  const positions = new Map();
+  Object.values(state.cards).forEach((card) => {
+    if (!groupIds.has(card.id)) {
+      positions.set(card.id, { x: card.x, y: card.y });
+    }
+  });
+  return positions;
+}
+
+function finalizeGroupDisplacementSnapshot(labelId) {
+  const positions = uiState.groupDisplacementSnapshots.get(labelId);
+  if (!positions) {
+    return;
+  }
+  positions.forEach((entry, cardId) => {
+    const card = state.cards[cardId];
+    if (!card || (Math.abs(card.x - entry.x) < 0.01 && Math.abs(card.y - entry.y) < 0.01)) {
+      positions.delete(cardId);
+      return;
+    }
+    entry.pushedX = card.x;
+    entry.pushedY = card.y;
+  });
+}
+
+function getGroupRestoreEntries(labelId) {
+  const positions = uiState.groupDisplacementSnapshots.get(labelId);
+  if (!positions) {
+    return [];
+  }
+  const entries = [];
+  positions.forEach((entry, cardId) => {
+    const card = state.cards[cardId];
+    if (
+      !card ||
+      !Number.isFinite(entry.pushedX) ||
+      !Number.isFinite(entry.pushedY) ||
+      Math.abs(card.x - entry.pushedX) > 0.5 ||
+      Math.abs(card.y - entry.pushedY) > 0.5
+    ) {
+      return;
+    }
+    entries.push({
+      cardId,
+      fromX: card.x,
+      fromY: card.y,
+      toX: entry.x,
+      toY: entry.y
+    });
+  });
+  return entries;
+}
+
+function restoreDisplacedCards(animation, progress) {
+  const eased = 1 - Math.pow(1 - clamp(progress, 0, 1), 3);
+  animation.restoreEntries.forEach((entry) => {
+    const card = state.cards[entry.cardId];
+    if (!card) {
+      return;
+    }
+    card.x = entry.fromX + (entry.toX - entry.fromX) * eased;
+    card.y = entry.fromY + (entry.toY - entry.fromY) * eased;
+  });
+}
+
+function pushCardsFromUnfurl(animation, forceFinal = false) {
+  const labelId = animation.labelId;
+  const memberIds = getLabelMemberRootIds(labelId).flatMap((rootId) => [
+    rootId,
+    ...getDescendants(rootId)
+  ]);
+  const groupIds = new Set([labelId, ...memberIds]);
+  let movedObstacle = false;
+
+  [labelId, ...memberIds].forEach((cardId) => {
+    const element = cardElements.get(cardId);
+    if (!forceFinal && cardId !== labelId && (!element || Number.parseFloat(getComputedStyle(element).opacity) <= 0.001)) {
+      return;
+    }
+    const currentRect = forceFinal ? getLayoutBounds(cardId) : getRenderedCardWorldRect(cardId);
+    const previousRect = animation.previousRects.get(cardId);
+    animation.previousRects.set(cardId, currentRect);
+    const finalRect = getLayoutBounds(cardId);
+    const labelRect = getLayoutBounds(labelId);
+    const deltaX = previousRect
+      ? currentRect.x + currentRect.w / 2 - (previousRect.x + previousRect.w / 2)
+      : finalRect.x + finalRect.w / 2 - (labelRect.x + labelRect.w / 2);
+    const deltaY = previousRect
+      ? currentRect.y + currentRect.h / 2 - (previousRect.y + previousRect.h / 2)
+      : finalRect.y + finalRect.h / 2 - (labelRect.y + labelRect.h / 2);
+
+    let safety = 0;
+    let obstacle = null;
+    do {
+      obstacle = Object.values(state.cards).find((candidate) => {
+        if (
+          groupIds.has(candidate.id) ||
+          isHiddenByCollapsedAncestor(candidate.id) ||
+          Array.from(groupIds).some((groupId) =>
+            isDescendant(candidate.id, groupId) || isDescendant(groupId, candidate.id)
+          )
+        ) {
+          return false;
+        }
+        return rectsOverlapWithGap(currentRect, getLayoutBounds(candidate.id), CARD_GAP);
+      });
+      if (!obstacle) {
+        break;
+      }
+
+      let obstacleIds = getDragTargetCardIds(obstacle.id);
+      if (obstacle.isLabel && obstacleIds.some((id) => groupIds.has(id))) {
+        obstacleIds = [obstacle.id];
+      }
+      obstacleIds = uniqueExistingCardIds(obstacleIds).filter((id) => !groupIds.has(id));
+      if (obstacleIds.length === 0) {
+        break;
+      }
+      const obstacleRect = getLayoutBounds(obstacle.id);
+      const requiredShift = getUnfurlCollisionShift(
+        currentRect,
+        obstacleRect,
+        { x: deltaX, y: deltaY }
+      );
+      if (Math.hypot(requiredShift.x, requiredShift.y) < 0.01) {
+        break;
+      }
+      moveCardSetBy(obstacleIds, requiredShift.x, requiredShift.y);
+      pushCardsFromDrag(obstacleIds, requiredShift.x, requiredShift.y, [...groupIds]);
+      movedObstacle = true;
+      safety += 1;
+    } while (safety < 80);
+  });
+
+  return movedObstacle;
+}
+
+function getUnfurlCollisionShift(currentRect, obstacleRect, motion) {
+  const currentCenter = cardCenter(currentRect);
+  const obstacleCenter = cardCenter(obstacleRect);
+  const horizontalShifts = [
+    { x: currentRect.x - CARD_GAP - (obstacleRect.x + obstacleRect.w), y: 0 },
+    { x: currentRect.x + currentRect.w + CARD_GAP - obstacleRect.x, y: 0 }
+  ];
+  const verticalShifts = [
+    { x: 0, y: currentRect.y - CARD_GAP - (obstacleRect.y + obstacleRect.h) },
+    { x: 0, y: currentRect.y + currentRect.h + CARD_GAP - obstacleRect.y }
+  ];
+
+  if (Math.abs(motion.y) >= Math.abs(motion.x)) {
+    return obstacleCenter.x < currentCenter.x ? horizontalShifts[0] : horizontalShifts[1];
+  }
+  return obstacleCenter.y < currentCenter.y ? verticalShifts[0] : verticalShifts[1];
 }
 
 function getCollapsedLabelOwnerId(cardId) {
@@ -1815,24 +2191,6 @@ function applyCardTextFormatting(body, card) {
   body.style.textAlign = card.textAlign || "left";
 }
 
-function getNoteWidthCap(card) {
-  if (!card || card.isLabel) {
-    return MAX_LABEL_CARD_WIDTH;
-  }
-  return Math.max(
-    MAX_NOTE_CARD_WIDTH,
-    toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH),
-    toNumber(card.w, MAX_NOTE_CARD_WIDTH)
-  );
-}
-
-function getCardFitMinWidth(card) {
-  if (!card || card.isLabel) {
-    return LABEL_CARD_MIN_WIDTH;
-  }
-  return FIT_CARD_MIN_WIDTH;
-}
-
 function getCardFitMinHeight(card) {
   if (!card || card.isLabel) {
     return LABEL_CARD_MIN_HEIGHT;
@@ -1960,7 +2318,7 @@ function measureCardTextBlock(body, content, maxWidth, options = {}) {
 }
 
 function applyLabelModalTheme(cardId) {
-  applyPopupTheme(dom.labelModal);
+  applyPopupTheme(dom.labelModal, state.cards[cardId]?.color);
 }
 
 function clearLabelModalTheme() {
@@ -1974,11 +2332,11 @@ function getMostRecentNoteColor() {
   return isHex(latestNote?.color) ? latestNote.color : uiState.activeColor;
 }
 
-function applyPopupTheme(modal) {
+function applyPopupTheme(modal, fillOverride = null) {
   if (!modal) {
     return;
   }
-  const fill = getMostRecentNoteColor();
+  const fill = isHex(fillOverride) ? fillOverride : getMostRecentNoteColor();
   const ink = hasReadableBlackText(fill) ? NOTE_CARD_INK : getReadableInk(fill);
   modal.style.setProperty("--modal-fill", fill);
   modal.style.setProperty("--modal-ink", ink);
@@ -2014,21 +2372,80 @@ function getCardCollapseTransform(cardId) {
   }
 
   const cardRect = getWorldRect(cardId);
-  const labelRect = getWorldRect(labelId);
   const cardMid = cardCenter(cardRect);
-  const labelExit = {
-    x: labelRect.x + labelRect.w / 2,
-    y: labelRect.y + labelRect.h + 5
-  };
-  const dx = labelExit.x - cardMid.x;
-  const dy = labelExit.y - cardMid.y;
-  return `translate(${dx}px, ${dy}px) scale(0.34, 0.08)`;
+  const targetId = getCardCollapseTargetId(cardId, labelId);
+  const targetRect = getWorldRect(targetId || labelId);
+  const targetPoint = targetId
+    ? cardCenter(targetRect)
+    : { x: targetRect.x + targetRect.w / 2, y: targetRect.y + targetRect.h + 5 };
+  const dx = targetPoint.x - cardMid.x;
+  const dy = targetPoint.y - cardMid.y;
+  return `translate(${dx}px, ${dy}px) scale(0.16)`;
 }
 
-function getVisibleCardIds() {
-  return Object.values(state.cards)
-    .filter((card) => !isHiddenByCollapsedAncestor(card.id))
-    .map((card) => card.id);
+function getCardCollapseTargetId(cardId, labelId) {
+  const card = state.cards[cardId];
+  const label = state.cards[labelId];
+  if (!card || !label?.isLabel) {
+    return null;
+  }
+  if (card.parentId) {
+    return card.parentId;
+  }
+
+  const seedRootId = label.labelRootId;
+  if (!seedRootId || cardId === seedRootId) {
+    return null;
+  }
+
+  const previous = new Map([[seedRootId, null]]);
+  const queue = [seedRootId];
+  while (queue.length > 0 && !previous.has(cardId)) {
+    const currentId = queue.shift();
+    state.connections.forEach((connection) => {
+      const fromId = state.cards[connection.fromId] ? getRootId(connection.fromId) : null;
+      const toId = state.cards[connection.toId] ? getRootId(connection.toId) : null;
+      const neighborId = fromId === currentId ? toId : toId === currentId ? fromId : null;
+      if (neighborId && !previous.has(neighborId)) {
+        previous.set(neighborId, currentId);
+        queue.push(neighborId);
+      }
+    });
+  }
+  return previous.get(cardId) || null;
+}
+
+function getCardCollapseDepth(cardId, labelId) {
+  let depth = 1;
+  let currentId = cardId;
+  const visited = new Set();
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const targetId = getCardCollapseTargetId(currentId, labelId);
+    if (!targetId) {
+      return depth;
+    }
+    depth += 1;
+    currentId = targetId;
+  }
+  return depth;
+}
+
+function applyCardCollapseTiming(element, cardId, labelId) {
+  const memberIds = getLabelMemberRootIds(labelId).flatMap((rootId) => [
+    rootId,
+    ...getDescendants(rootId)
+  ]);
+  const depth = getCardCollapseDepth(cardId, labelId);
+  const maxDepth = Math.max(...memberIds.map((id) => getCardCollapseDepth(id, labelId)), depth);
+  element.style.setProperty(
+    "--collapse-delay",
+    `${Math.max(0, maxDepth - depth) * GROUP_ANIMATION_STEP_MS}ms`
+  );
+  element.style.setProperty(
+    "--expand-delay",
+    `${Math.max(0, depth - 1) * GROUP_ANIMATION_STEP_MS}ms`
+  );
 }
 
 function getSubtreeBounds(cardId) {
@@ -2066,12 +2483,6 @@ function getLayoutBounds(cardId) {
 function getCollisionShift(currentRect, siblingRect, motion) {
   const currentCenter = cardCenter(currentRect);
   const siblingCenter = cardCenter(siblingRect);
-  const preferHorizontal =
-    Math.abs(motion.x) > Math.abs(motion.y)
-      ? true
-      : Math.abs(motion.x) < Math.abs(motion.y)
-        ? false
-        : null;
 
   const pushHorizontal = (direction) => ({
     x:
@@ -2088,26 +2499,19 @@ function getCollisionShift(currentRect, siblingRect, motion) {
         : currentRect.y - CARD_GAP - (siblingRect.y + siblingRect.h)
   });
 
-  if (preferHorizontal === true) {
-    return pushHorizontal(motion.x >= 0 ? 1 : -1);
-  }
-  if (preferHorizontal === false) {
-    return pushVertical(motion.y >= 0 ? 1 : -1);
-  }
-
-  const overlapX =
-    Math.min(currentRect.x + currentRect.w, siblingRect.x + siblingRect.w) -
-    Math.max(currentRect.x, siblingRect.x) +
-    CARD_GAP;
-  const overlapY =
-    Math.min(currentRect.y + currentRect.h, siblingRect.y + siblingRect.h) -
-    Math.max(currentRect.y, siblingRect.y) +
-    CARD_GAP;
-
-  if (overlapX <= overlapY) {
-    return pushHorizontal(siblingCenter.x >= currentCenter.x ? 1 : -1);
-  }
-  return pushVertical(siblingCenter.y >= currentCenter.y ? 1 : -1);
+  const candidates = [
+    pushHorizontal(-1),
+    pushHorizontal(1),
+    pushVertical(-1),
+    pushVertical(1)
+  ];
+  return candidates.sort((left, right) => {
+    const distanceDifference = Math.hypot(left.x, left.y) - Math.hypot(right.x, right.y);
+    if (Math.abs(distanceDifference) > 0.001) {
+      return distanceDifference;
+    }
+    return -(left.x * motion.x + left.y * motion.y) + (right.x * motion.x + right.y * motion.y);
+  })[0];
 }
 
 function startDraft(event) {
@@ -2152,22 +2556,8 @@ function finishDraft() {
   }
 
   const cardId = createCard(rect);
-  if (isMobileLayout()) {
-    resolveMobileCardOverlap(cardId, {
-      x: draft.currentWorld.x - draft.startWorld.x,
-      y: draft.currentWorld.y - draft.startWorld.y
-    });
-  } else {
-    resolveCardPlacement(cardId, {
-      x: draft.currentWorld.x - draft.startWorld.x,
-      y: draft.currentWorld.y - draft.startWorld.y
-    });
-  }
+  pushCardsClearOfNewCard(cardId);
   ensureCardBelowMobileControls(cardId);
-  if (isMobileLayout()) {
-    resolveMobileCardOverlap(cardId, { x: 0, y: 1 });
-    ensureCardBelowMobileControls(cardId);
-  }
   setSelectedCard(cardId);
   uiState.pendingFocusCardId = cardId;
   if (isMobileLayout()) {
@@ -2239,7 +2629,6 @@ function startCardDrag(event, cardId, kind = "move", options = {}) {
     cardId,
     kind,
     targetCardIds,
-    originalParentId: card.parentId,
     offsetX: worldPoint.x - rect.x,
     offsetY: worldPoint.y - rect.y,
     pointer: { x: event.clientX, y: event.clientY },
@@ -2273,26 +2662,13 @@ function updateCardDrag(event) {
   const nextWorldY = worldPoint.y - interaction.drag.offsetY;
   const deltaX = nextWorldX - currentRect.x;
   const deltaY = nextWorldY - currentRect.y;
-  moveCardSetBy(interaction.drag.targetCardIds, deltaX, deltaY);
+  if (interaction.drag.kind === "move") {
+    moveDraggedCardsWithPush(interaction.drag.targetCardIds, deltaX, deltaY);
+  } else {
+    moveCardSetBy(interaction.drag.targetCardIds, deltaX, deltaY);
+  }
   interaction.drag.pointer = { x: event.clientX, y: event.clientY };
-  if (interaction.drag.kind === "move" && interaction.drag.targetCardIds.length > 1) {
-    resolveMobileCardOverlap(
-      interaction.drag.cardId,
-      { x: deltaX, y: deltaY },
-      interaction.drag.targetCardIds
-    );
-    ensureCardSetBelowMobileControls(interaction.drag.targetCardIds);
-  } else if (interaction.drag.kind === "move" && !isMobileLayout()) {
-    resolveCardSetPlacement(interaction.drag.targetCardIds, {
-      x: deltaX,
-      y: deltaY
-    });
-  } else if (interaction.drag.kind === "move") {
-    resolveMobileCardOverlap(
-      interaction.drag.cardId,
-      { x: deltaX, y: deltaY },
-      interaction.drag.targetCardIds
-    );
+  if (interaction.drag.kind === "move" && isMobileLayout()) {
     ensureCardSetBelowMobileControls(interaction.drag.targetCardIds);
   }
   requestRender();
@@ -2319,13 +2695,7 @@ function finishCardDrag() {
     return;
   }
 
-  if (drag.targetCardIds.length > 1) {
-    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 }, drag.targetCardIds);
-    ensureCardSetBelowMobileControls(drag.targetCardIds);
-  } else if (!isMobileLayout()) {
-    resolveCardSetPlacement(drag.targetCardIds, { x: 0, y: 0 });
-  } else {
-    resolveMobileCardOverlap(drag.cardId, { x: 0, y: 0 }, drag.targetCardIds);
+  if (isMobileLayout()) {
     ensureCardSetBelowMobileControls(drag.targetCardIds);
   }
   bringCardsForward(drag.targetCardIds);
@@ -2423,81 +2793,6 @@ function finishCardResize() {
   }
 
   resolveCardPlacement(resize.cardId, { x: 0, y: 0 });
-  scheduleSave();
-  requestRender();
-}
-
-function startCardScale(event, cardId) {
-  const card = state.cards[cardId];
-  const cardElement = cardElements.get(cardId);
-  const body = cardElement?.querySelector(".card-body");
-  if (!card || card.isLabel || !body) {
-    return;
-  }
-
-  const rect = getWorldRect(cardId);
-  interaction.mode = "scale-card";
-  interaction.primaryPointerId = event.pointerId;
-  capturePointer(event.pointerId);
-  interaction.scale = {
-    cardId,
-    startScreen: { x: event.clientX, y: event.clientY },
-    startFontScale: getCardFontScale(card),
-    startWidthCap: Math.max(getNoteWidthCap(card), rect.w)
-  };
-
-  setSelectedCard(cardId);
-  if (document.activeElement === body) {
-    body.blur();
-    window.getSelection()?.removeAllRanges();
-  }
-  bringCardForward(cardId);
-  requestRender();
-}
-
-function updateCardScale(event) {
-  const scale = interaction.scale;
-  if (!scale) {
-    return;
-  }
-
-  const card = state.cards[scale.cardId];
-  const body = cardElements.get(scale.cardId)?.querySelector(".card-body");
-  if (!card || card.isLabel || !body) {
-    return;
-  }
-
-  const delta =
-    event.clientX -
-    scale.startScreen.x +
-    (event.clientY - scale.startScreen.y);
-  const scaleFactor = clamp(
-    Math.exp(delta * SIZE_TOOL_SENSITIVITY),
-    MIN_NOTE_FONT_SCALE / scale.startFontScale,
-    MAX_NOTE_FONT_SCALE / scale.startFontScale
-  );
-
-  card.fontScale = clamp(scale.startFontScale * scaleFactor, MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
-  card.fitMinWidth = FIT_CARD_MIN_WIDTH;
-  card.fitMinHeight = FIT_CARD_MIN_HEIGHT;
-
-  body.style.setProperty("--card-font-scale", String(getCardFontScale(card)));
-  growCardHeightToContent(scale.cardId, body);
-  requestRender();
-}
-
-function finishCardScale() {
-  const scale = interaction.scale;
-  interaction.mode = null;
-  interaction.primaryPointerId = null;
-  interaction.scale = null;
-
-  if (!scale || !state.cards[scale.cardId]) {
-    requestRender();
-    return;
-  }
-
-  resolveCardPlacement(scale.cardId, { x: 0, y: 0 });
   scheduleSave();
   requestRender();
 }
@@ -2706,7 +3001,6 @@ function beginGestureIfNeeded() {
   interaction.pan = null;
   interaction.drag = null;
   interaction.resize = null;
-  interaction.scale = null;
   interaction.brush = null;
   dom.draftRect.hidden = true;
   interaction.gesture = {
@@ -2766,7 +3060,6 @@ function cancelActiveInteraction() {
   interaction.pan = null;
   interaction.drag = null;
   interaction.resize = null;
-  interaction.scale = null;
   interaction.brush = null;
   interaction.gesture = null;
   dom.draftRect.hidden = true;
@@ -2859,23 +3152,6 @@ function setCardWorldRect(cardId, rect) {
   card.h = Math.max(MIN_CARD_HEIGHT, rect.h);
 }
 
-function reparentCard(cardId, newParentId) {
-  const card = state.cards[cardId];
-  if (!card) {
-    return;
-  }
-
-  if (newParentId && (newParentId === cardId || isDescendant(newParentId, cardId))) {
-    return;
-  }
-
-  const rect = getWorldRect(cardId);
-  const parentRect = newParentId ? getWorldRect(newParentId) : { x: 0, y: 0 };
-  card.parentId = newParentId;
-  card.x = rect.x - parentRect.x;
-  card.y = rect.y - parentRect.y;
-}
-
 function rectsOverlapWithGap(leftRect, rightRect, gap = 0) {
   return !(
     leftRect.x + leftRect.w + gap <= rightRect.x ||
@@ -2909,7 +3185,6 @@ function resolveSiblingCollisions(anchorId, motion = { x: 0, y: 0 }, parentId = 
       return true;
     });
 
-    let movedCurrent = false;
     for (const sibling of siblings) {
       const currentBounds = getLayoutBounds(currentId);
       const siblingBounds = getLayoutBounds(sibling.id);
@@ -2922,9 +3197,6 @@ function resolveSiblingCollisions(anchorId, motion = { x: 0, y: 0 }, parentId = 
       queue.push(sibling.id);
     }
 
-    if (movedCurrent) {
-      queue.push(currentId);
-    }
   }
 }
 
@@ -2939,39 +3211,6 @@ function resolveCardPlacement(cardId, motion = { x: 0, y: 0 }) {
   if (rootId !== cardId) {
     resolveSiblingCollisions(rootId, motion, null);
   }
-}
-
-function pullRootsTogether(sourceId, targetId) {
-  if (sourceId === targetId || !state.cards[sourceId] || !state.cards[targetId]) {
-    return;
-  }
-  const anchorId = sourceId;
-  const moveId = targetId;
-
-  const gap = 28;
-  const anchorRect = getSubtreeBounds(anchorId);
-  const movingRect = getSubtreeBounds(moveId);
-  const sourceCenter = cardCenter(anchorRect);
-  const targetCenter = cardCenter(movingRect);
-  const deltaX = targetCenter.x - sourceCenter.x;
-  const deltaY = targetCenter.y - sourceCenter.y;
-
-  let nextX = movingRect.x;
-  let nextY = movingRect.y;
-  if (Math.abs(deltaX) >= Math.abs(deltaY)) {
-    nextX = deltaX >= 0 ? anchorRect.x + anchorRect.w + gap : anchorRect.x - movingRect.w - gap;
-    nextY = anchorRect.y + (anchorRect.h - movingRect.h) / 2;
-  } else {
-    nextY = deltaY >= 0 ? anchorRect.y + anchorRect.h + gap : anchorRect.y - movingRect.h - gap;
-    nextX = anchorRect.x + (anchorRect.w - movingRect.w) / 2;
-  }
-
-  setCardWorldPosition(moveId, nextX, nextY);
-  shiftConnectionPathsForMovedRoots([moveId], nextX - movingRect.x, nextY - movingRect.y);
-  resolveCardPlacement(moveId, {
-    x: nextX - movingRect.x,
-    y: nextY - movingRect.y
-  });
 }
 
 function shiftConnectionPathsForMovedRoots(cardIds, deltaX, deltaY) {
@@ -3011,13 +3250,28 @@ function applyColorToSubtree(cardId, color) {
       card.color = color;
     }
   });
+  syncLabelColorsForCard(cardId, color);
 }
 
 function applyColorToCard(cardId, color) {
   const card = state.cards[cardId];
   if (card && !card.isLabel && isHex(color)) {
     card.color = color;
+    syncLabelColorsForCard(cardId, color);
   }
+}
+
+function syncLabelColorsForCard(cardId, color) {
+  const card = state.cards[cardId];
+  if (!card || card.isLabel || !isHex(color)) {
+    return;
+  }
+  getLabelIdsForRoot(getRootId(cardId)).forEach((labelId) => {
+    const label = state.cards[labelId];
+    if (label?.isLabel) {
+      label.color = color;
+    }
+  });
 }
 
 function setBoardBackgroundColor(color) {
@@ -3273,8 +3527,11 @@ function wipeBoard() {
   state = createEmptyState();
   uiState.selectedCardId = null;
   uiState.pendingLabelRootId = null;
+  uiState.pendingLabelEditId = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
+  uiState.groupAnimation = null;
+  uiState.groupDisplacementSnapshots.clear();
   cancelActiveInteraction();
   localStorage.removeItem(STORAGE_KEY);
   requestRender();
@@ -3405,8 +3662,11 @@ async function handleImportFileChange(event) {
     state = normalizeStateSnapshot(parsed);
     uiState.selectedCardId = null;
     uiState.pendingLabelRootId = null;
+    uiState.pendingLabelEditId = null;
     uiState.pendingDeleteCardId = null;
     uiState.pendingFocusCardId = null;
+    uiState.groupAnimation = null;
+    uiState.groupDisplacementSnapshots.clear();
     cancelActiveInteraction();
     saveNow();
     requestRender();
@@ -3487,6 +3747,14 @@ function syncCards() {
         ? LABEL_CARD_FILL
         : PALETTE[0].fill;
     const hiddenByLabel = isHiddenByCollapsedLabel(card.id);
+    const collapsedLabelId = hiddenByLabel ? getCollapsedLabelOwnerId(card.id) : null;
+    const activeGroupLabelId = uiState.groupAnimation?.labelId || null;
+    const activeGroupContainsCard = !!(
+      activeGroupLabelId &&
+      !card.isLabel &&
+      getLabelMemberRootIds(activeGroupLabelId).includes(getRootId(card.id))
+    );
+    const layeredLabelId = collapsedLabelId || (activeGroupContainsCard ? activeGroupLabelId : null);
     let element = cardElements.get(card.id);
     if (!element) {
       element = createCardElement(card.id);
@@ -3498,8 +3766,17 @@ function syncCards() {
     element.classList.toggle("is-selected", selected);
     element.classList.toggle("is-label", !!card.isLabel);
     element.classList.toggle("is-collapsed", !!card.collapsed);
-    element.style.zIndex = String(100 + getDepth(card.id) * 1000 + card.order);
-    element.style.opacity = hiddenByLabel ? "0" : "1";
+    element.classList.toggle("is-sucked-in", hiddenByLabel);
+    if (collapsedLabelId) {
+      applyCardCollapseTiming(element, card.id, collapsedLabelId);
+    }
+    if (layeredLabelId) {
+      const labelOrder = state.cards[layeredLabelId]?.order || card.order;
+      const sequenceDepth = getCardCollapseDepth(card.id, layeredLabelId);
+      element.style.zIndex = String(100 + labelOrder - sequenceDepth);
+    } else {
+      element.style.zIndex = String(100 + getDepth(card.id) * 1000 + card.order);
+    }
     element.style.pointerEvents = hiddenByLabel ? "none" : "";
     element.style.transform = hiddenByLabel ? getCardCollapseTransform(card.id) : "";
     element.style.setProperty("--card-fill", displayFill);
@@ -3606,8 +3883,11 @@ function restoreUndoSnapshot() {
   state = normalizeStateSnapshot(snapshot);
   uiState.selectedCardId = null;
   uiState.pendingLabelRootId = null;
+  uiState.pendingLabelEditId = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
+  uiState.groupAnimation = null;
+  uiState.groupDisplacementSnapshots.clear();
   cancelActiveInteraction();
   saveNow();
   requestRender();
@@ -3625,32 +3905,97 @@ function renderConnections() {
     .map((connection) => {
       const fromId = state.cards[connection.fromId] ? getRootId(connection.fromId) : null;
       const toId = state.cards[connection.toId] ? getRootId(connection.toId) : null;
+      const fromCollapsedLabelId = fromId ? getCollapsedLabelOwnerId(fromId) : null;
+      const toCollapsedLabelId = toId ? getCollapsedLabelOwnerId(toId) : null;
+      const collapsedLabelId = fromCollapsedLabelId && fromCollapsedLabelId === toCollapsedLabelId
+        ? fromCollapsedLabelId
+        : null;
       if (
         !fromId ||
         !toId ||
         fromId === toId ||
         state.cards[fromId]?.isLabel ||
         state.cards[toId]?.isLabel ||
-        isHiddenByCollapsedAncestor(fromId) ||
-        isHiddenByCollapsedAncestor(toId)
+        ((isHiddenByCollapsedAncestor(fromId) || isHiddenByCollapsedAncestor(toId)) &&
+          collapsedLabelId !== (uiState.groupAnimation?.collapsing ? uiState.groupAnimation.labelId : null))
       ) {
         return "";
       }
 
-      const fromRect = getWorldRect(fromId);
-      const toRect = getWorldRect(toId);
-      const points = [
-        worldToScreen(cardCenter(fromRect)),
-        ...decodeConnectionShape(connection, fromId, toId).map(worldToScreen),
-        worldToScreen(cardCenter(toRect))
-      ];
+      if (collapsedLabelId && uiState.groupAnimation?.collapsing) {
+        const fromElement = cardElements.get(fromId);
+        const toElement = cardElements.get(toId);
+        const fromOpacity = fromElement ? Number.parseFloat(getComputedStyle(fromElement).opacity) : 0;
+        const toOpacity = toElement ? Number.parseFloat(getComputedStyle(toElement).opacity) : 0;
+        if (fromOpacity <= 0.001 || toOpacity <= 0.001) {
+          return "";
+        }
+      }
+
+      const fromPoint = getRenderedCardScreenCenter(fromId);
+      const toPoint = getRenderedCardScreenCenter(toId);
+      const dx = toPoint.x - fromPoint.x;
+      const dy = toPoint.y - fromPoint.y;
+      const viaPoints = Array.isArray(connection.shape) && connection.shape.length > 0
+        ? connection.shape.map((point) => ({
+            x: fromPoint.x + point.u * dx - point.v * dy,
+            y: fromPoint.y + point.u * dy + point.v * dx
+          }))
+        : (connection.via || []).map(worldToScreen);
+      const points = [fromPoint, ...viaPoints, toPoint];
       const path = buildSmoothPath(points);
-      const stroke = hexToRgba(getPaletteSwatch(connection.color).ink, 0.5);
-      return `<path class="connection-path" d="${path}" stroke="${stroke}"></path>`;
+      const activeAnimation = uiState.groupAnimation;
+      let pathOpacity = 1;
+      if (activeAnimation && !activeAnimation.collapsing) {
+        const memberRootIds = getLabelMemberRootIds(activeAnimation.labelId);
+        if (memberRootIds.includes(fromId) && memberRootIds.includes(toId)) {
+          const connectionDepth = Math.max(
+            getCardCollapseDepth(fromId, activeAnimation.labelId),
+            getCardCollapseDepth(toId, activeAnimation.labelId)
+          );
+          const revealAt = Math.max(0, connectionDepth - 1) * GROUP_ANIMATION_STEP_MS;
+          pathOpacity = Date.now() - activeAnimation.startedAt >= revealAt ? 1 : 0;
+        }
+      }
+      return `<path class="connection-path" d="${path}" style="opacity:${pathOpacity}"></path>`;
     })
     .join("");
 
   dom.connectionsLayer.innerHTML = fragments;
+}
+
+function getRenderedCardScreenCenter(cardId) {
+  if (uiState.groupAnimation) {
+    const element = cardElements.get(cardId);
+    if (element) {
+      const cardRect = element.getBoundingClientRect();
+      const viewportRect = dom.viewport.getBoundingClientRect();
+      return {
+        x: cardRect.left - viewportRect.left + cardRect.width / 2,
+        y: cardRect.top - viewportRect.top + cardRect.height / 2
+      };
+    }
+  }
+  return worldToScreen(cardCenter(getWorldRect(cardId)));
+}
+
+function getRenderedCardWorldRect(cardId) {
+  const element = cardElements.get(cardId);
+  if (!element) {
+    return getWorldRect(cardId);
+  }
+  const cardRect = element.getBoundingClientRect();
+  const viewportRect = dom.viewport.getBoundingClientRect();
+  const topLeft = screenToWorld({
+    x: cardRect.left - viewportRect.left,
+    y: cardRect.top - viewportRect.top
+  });
+  return {
+    x: topLeft.x,
+    y: topLeft.y,
+    w: cardRect.width / state.camera.scale,
+    h: cardRect.height / state.camera.scale
+  };
 }
 
 function renderBrushPreview() {
@@ -3857,10 +4202,10 @@ function renderBoardExportCanvas(scene) {
     ctx.save();
     ctx.beginPath();
     traceSmoothCanvasPath(ctx, connection.points);
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 1;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = hexToRgba(getPaletteSwatch(connection.color).ink, 0.5);
+    ctx.strokeStyle = "#000000";
     ctx.stroke();
     ctx.restore();
   });
@@ -4133,15 +4478,6 @@ function isFiniteNumber(value) {
 
 function isHex(value) {
   return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value);
-}
-
-function getPaletteSwatch(fill) {
-  const match = PALETTE.find((swatch) => swatch.fill.toLowerCase() === fill.toLowerCase());
-  return match || {
-    name: "Custom",
-    fill,
-    ink: getReadableInk(fill)
-  };
 }
 
 function getReadableInk(fill) {
