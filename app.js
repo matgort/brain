@@ -1,5 +1,7 @@
 const STORAGE_KEY = "brainstorm-canvas-v1";
 const EXPORT_SEQUENCE_KEY = "brainstorm-export-sequence-v1";
+// Reversible experiment: set to false to ignore and remove parent-group titles on load.
+const ENABLE_GROUP_OF_GROUPS = true;
 const MIN_CARD_WIDTH = 40;
 const MIN_CARD_HEIGHT = 92;
 const MIN_DRAW_GESTURE = 10;
@@ -21,6 +23,7 @@ const LABEL_GROUP_GAP = 10;
 const NEW_CARD_GAP = 6;
 const GROUP_ANIMATION_DURATION_MS = 280;
 const GROUP_ANIMATION_STEP_MS = 235;
+const PARENT_GROUP_ANIMATION_STEP_MS = 105;
 const EXPORT_PADDING = 44;
 const DEFAULT_BACKGROUND_COLOR = "#d7d7d7";
 const NOTE_CARD_INK = "#000000";
@@ -124,6 +127,8 @@ const uiState = {
   currentTool: "default",
   pendingLabelRootId: null,
   pendingLabelEditId: null,
+  pendingParentGroupChildIds: [],
+  pendingParentGroupColor: null,
   pendingDeleteCardId: null,
   pendingFocusCardId: null,
   labelModalPrimed: false,
@@ -132,6 +137,7 @@ const uiState = {
   colorTargetPending: false,
   paletteEditingCardId: null,
   groupAnimation: null,
+  parentGroupAnimation: null,
   groupAnimationSequence: 0,
   groupDisplacementSnapshots: new Map()
 };
@@ -145,6 +151,7 @@ const interaction = {
   drag: null,
   resize: null,
   brush: null,
+  groupSelection: null,
   gesture: null
 };
 
@@ -289,6 +296,10 @@ function normalizeStateSnapshot(parsed) {
       color: isHex(card.color) ? card.color : PALETTE[0].fill,
       isLabel,
       labelRootId: card.labelRootId ? String(card.labelRootId) : null,
+      isParentGroup: isLabel && ENABLE_GROUP_OF_GROUPS && !!card.isParentGroup,
+      childLabelIds: isLabel && ENABLE_GROUP_OF_GROUPS && !!card.isParentGroup && Array.isArray(card.childLabelIds)
+        ? Array.from(new Set(card.childLabelIds.map(String)))
+        : [],
       collapsed: !!card.collapsed,
       widthCap,
       fontScale,
@@ -383,6 +394,13 @@ function normalizeStateSnapshot(parsed) {
 }
 
 function sanitizeCardRelationships(cards) {
+  if (!ENABLE_GROUP_OF_GROUPS) {
+    Object.values(cards).forEach((card) => {
+      if (card.isLabel && card.isParentGroup) {
+        delete cards[card.id];
+      }
+    });
+  }
   Object.values(cards).forEach((card) => {
     if (!card.parentId || !cards[card.parentId] || cards[card.parentId].isLabel || card.parentId === card.id) {
       card.parentId = null;
@@ -390,6 +408,14 @@ function sanitizeCardRelationships(cards) {
     if (card.isLabel) {
       card.parentId = null;
       if (!card.labelRootId || !cards[card.labelRootId] || cards[card.labelRootId].isLabel) {
+        card.labelRootId = null;
+      }
+      card.childLabelIds = ENABLE_GROUP_OF_GROUPS && card.isParentGroup
+        ? Array.from(new Set(card.childLabelIds || [])).filter((childId) => {
+            return childId !== card.id && cards[childId]?.isLabel;
+          })
+        : [];
+      if (card.childLabelIds.length > 0) {
         card.labelRootId = null;
       }
     }
@@ -406,6 +432,35 @@ function sanitizeCardRelationships(cards) {
       visited.add(currentId);
       currentId = cards[currentId]?.parentId || null;
     }
+  });
+
+  // A label may belong to only one parent. Keeping the earliest parent makes
+  // malformed imports deterministic and prevents hierarchy cycles.
+  const claimedChildren = new Set();
+  Object.values(cards)
+    .filter((card) => card.isLabel && card.isParentGroup)
+    .sort((left, right) => left.order - right.order)
+    .forEach((parent) => {
+      parent.childLabelIds = parent.childLabelIds.filter((childId) => {
+        if (claimedChildren.has(childId) || labelHierarchyContains(cards, childId, parent.id)) {
+          return false;
+        }
+        claimedChildren.add(childId);
+        return true;
+      });
+    });
+}
+
+function labelHierarchyContains(cards, labelId, soughtId, visited = new Set()) {
+  if (labelId === soughtId) {
+    return true;
+  }
+  if (visited.has(labelId)) {
+    return false;
+  }
+  visited.add(labelId);
+  return (cards[labelId]?.childLabelIds || []).some((childId) => {
+    return labelHierarchyContains(cards, childId, soughtId, visited);
   });
 }
 
@@ -488,6 +543,9 @@ function applyToolState() {
   document.body.dataset.tool = uiState.currentTool;
   document.body.classList.toggle("is-space-panning", isSpacePressed);
   dom.toolButtons.forEach((button) => {
+    if (button.dataset.tool === "group") {
+      button.hidden = !ENABLE_GROUP_OF_GROUPS;
+    }
     const active = button.dataset.tool === uiState.currentTool;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
@@ -506,13 +564,17 @@ function toggleTool(tool) {
 }
 
 function setTool(tool) {
-  if (!["default", "brush", "label", "size", "delete"].includes(tool)) {
+  if (!["default", "brush", "label", "group", "size", "delete"].includes(tool)) {
     return;
   }
   cancelActiveInteraction();
   uiState.mobileNewCardMode = false;
   uiState.colorTargetPending = false;
   uiState.paletteEditingCardId = null;
+  if (tool !== "group") {
+    interaction.groupSelection = null;
+    dom.draftRect.hidden = true;
+  }
   uiState.currentTool = tool;
   if (isMobileLayout() && tool !== "default" && uiState.paletteVisible) {
     uiState.paletteVisible = false;
@@ -728,6 +790,12 @@ function handlePointerDown(event) {
     return;
   }
 
+  if (uiState.currentTool === "group") {
+    event.preventDefault();
+    startGroupSelection(event);
+    return;
+  }
+
   if (uiState.currentTool === "brush") {
     const brushStartCard = cardElement || (
       isMobileLayout() ? getCardNearScreenPoint(event.clientX, event.clientY, null, 44) : null
@@ -868,6 +936,12 @@ function handlePointerMove(event) {
   if (interaction.mode === "brush") {
     event.preventDefault();
     updateBrush(event);
+    return;
+  }
+
+  if (interaction.mode === "group-select") {
+    event.preventDefault();
+    updateGroupSelection(event);
   }
 }
 
@@ -896,6 +970,8 @@ function handlePointerUp(event) {
       finishCardResize();
     } else if (interaction.mode === "brush") {
       finishBrush(event);
+    } else if (interaction.mode === "group-select") {
+      finishGroupSelection();
     }
   }
 
@@ -1094,7 +1170,10 @@ function handleCardContextMenu(event) {
 
 function isCollapsibleLabel(cardId) {
   const card = state.cards[cardId];
-  return !!card?.isLabel && !!card.labelRootId && getLabelMemberRootIds(cardId).length > 0;
+  return !!card?.isLabel && (
+    getChildLabelIds(cardId).length > 0 ||
+    (!!card.labelRootId && getLabelMemberRootIds(cardId).length > 0)
+  );
 }
 
 function openDeleteModal(cardId) {
@@ -1218,6 +1297,10 @@ function deleteCardAndRelated(cardId) {
     if (!label?.isLabel) {
       return;
     }
+    if (getChildLabelIds(label.id).length > 0) {
+      label.childLabelIds = getChildLabelIds(label.id);
+      return;
+    }
 
     const survivingMemberRootIds = snapshot.memberRootIds.filter((rootId) => {
       return !!state.cards[rootId] && !state.cards[rootId].isLabel;
@@ -1240,6 +1323,8 @@ function deleteCardAndRelated(cardId) {
     label.text = normalizeLabelText(label.text);
   });
 
+  repairParentGroupsAfterDeletion(removedCardIdSet);
+
   if (uiState.selectedCardId && removedCardIdSet.has(uiState.selectedCardId)) {
     uiState.selectedCardId = null;
   }
@@ -1257,9 +1342,49 @@ function deleteCardAndRelated(cardId) {
   }
 }
 
+function repairParentGroupsAfterDeletion(removedCardIdSet) {
+  if (!ENABLE_GROUP_OF_GROUPS) {
+    return;
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    Object.values(state.cards)
+      .filter((card) => card.isLabel && card.isParentGroup)
+      .forEach((parent) => {
+        parent.childLabelIds = getChildLabelIds(parent.id);
+        if (parent.childLabelIds.length >= 2) {
+          return;
+        }
+        const replacementId = parent.childLabelIds[0] || null;
+        Object.values(state.cards).forEach((candidate) => {
+          if (!candidate.isLabel || !candidate.childLabelIds?.includes(parent.id)) {
+            return;
+          }
+          candidate.childLabelIds = candidate.childLabelIds.flatMap((childId) => {
+            return childId === parent.id && replacementId ? [replacementId] : childId === parent.id ? [] : [childId];
+          });
+        });
+        delete state.cards[parent.id];
+        uiState.groupDisplacementSnapshots.delete(parent.id);
+        removedCardIdSet.add(parent.id);
+        changed = true;
+      });
+  }
+}
+
 function getLabelMemberRootIds(labelId) {
   const label = state.cards[labelId];
-  if (!label?.isLabel || !label.labelRootId || !state.cards[label.labelRootId]) {
+  if (!label?.isLabel) {
+    return [];
+  }
+
+  if (ENABLE_GROUP_OF_GROUPS && label.childLabelIds?.length) {
+    return uniqueExistingCardIds(
+      label.childLabelIds.flatMap((childId) => getLabelMemberRootIds(childId))
+    );
+  }
+  if (!label.labelRootId || !state.cards[label.labelRootId]) {
     return [];
   }
 
@@ -1267,6 +1392,44 @@ function getLabelMemberRootIds(labelId) {
     const card = state.cards[rootId];
     return !!card && !card.isLabel;
   });
+}
+
+function getChildLabelIds(labelId) {
+  if (!ENABLE_GROUP_OF_GROUPS || !state.cards[labelId]?.isLabel || !state.cards[labelId]?.isParentGroup) {
+    return [];
+  }
+  return uniqueExistingCardIds(state.cards[labelId].childLabelIds || []).filter((childId) => {
+    return state.cards[childId]?.isLabel;
+  });
+}
+
+function getParentLabelId(labelId) {
+  if (!ENABLE_GROUP_OF_GROUPS) {
+    return null;
+  }
+  return Object.values(state.cards).find((card) => {
+    return card.isLabel && getChildLabelIds(card.id).includes(labelId);
+  })?.id || null;
+}
+
+function getDescendantLabelIds(labelId, visited = new Set()) {
+  if (visited.has(labelId)) {
+    return [];
+  }
+  visited.add(labelId);
+  return getChildLabelIds(labelId).flatMap((childId) => [
+    childId,
+    ...getDescendantLabelIds(childId, visited)
+  ]);
+}
+
+function getParentGroupContainedCardIds(labelId) {
+  const labelIds = getDescendantLabelIds(labelId);
+  const noteIds = getLabelMemberRootIds(labelId).flatMap((rootId) => [
+    rootId,
+    ...getDescendants(rootId)
+  ]);
+  return uniqueExistingCardIds([...labelIds, ...noteIds]);
 }
 
 function getLabelIdsForRoot(rootId) {
@@ -1293,6 +1456,13 @@ function getDragTargetCardIds(cardId) {
 
   if (card.isLabel) {
     const memberRootIds = getLabelMemberRootIds(cardId);
+    if (getParentLabelId(cardId)) {
+      return uniqueExistingCardIds([
+        cardId,
+        ...getDescendantLabelIds(cardId),
+        ...memberRootIds
+      ]);
+    }
     const relatedLabelIds = Object.values(state.cards)
       .filter((candidate) => {
         return candidate.isLabel && getLabelMemberRootIds(candidate.id).some((rootId) => {
@@ -1590,6 +1760,8 @@ function openLabelModal(cardId) {
   closeDeleteModal({ skipRender: true });
   uiState.pendingLabelRootId = rootId;
   uiState.pendingLabelEditId = null;
+  uiState.pendingParentGroupChildIds = [];
+  uiState.pendingParentGroupColor = null;
   uiState.labelModalPrimed = true;
   uiState.labelModalOpenedAt = Date.now();
   applyLabelModalTheme(rootId);
@@ -1612,6 +1784,8 @@ function openLabelEditModal(cardId) {
   closeSaveModal();
   uiState.pendingLabelRootId = null;
   uiState.pendingLabelEditId = cardId;
+  uiState.pendingParentGroupChildIds = [];
+  uiState.pendingParentGroupColor = null;
   uiState.labelModalPrimed = true;
   uiState.labelModalOpenedAt = Date.now();
   dom.labelInput.value = card.text || "";
@@ -1623,9 +1797,47 @@ function openLabelEditModal(cardId) {
   });
 }
 
+function openParentGroupModal(childLabelIds) {
+  const children = uniqueExistingCardIds(childLabelIds).filter((childId) => {
+    return state.cards[childId]?.isLabel && !getParentLabelId(childId);
+  });
+  if (!ENABLE_GROUP_OF_GROUPS || children.length < 2) {
+    showToast("Draw around at least two available group titles");
+    return;
+  }
+  closeResetModal();
+  closeSaveModal();
+  uiState.pendingLabelRootId = null;
+  uiState.pendingLabelEditId = null;
+  uiState.pendingParentGroupChildIds = children;
+  uiState.pendingParentGroupColor = getRandomParentGroupColor(children);
+  uiState.labelModalPrimed = true;
+  uiState.labelModalOpenedAt = Date.now();
+  applyPopupTheme(dom.labelModal, uiState.pendingParentGroupColor);
+  dom.labelInput.value = "";
+  dom.labelModal.hidden = false;
+  setTool("default");
+  window.requestAnimationFrame(() => {
+    uiState.labelModalPrimed = false;
+    dom.labelInput.focus();
+    dom.labelInput.select();
+  });
+}
+
+function getRandomParentGroupColor(childLabelIds) {
+  const childColors = new Set(childLabelIds.map((childId) => state.cards[childId]?.color));
+  const choices = DISPLAY_PALETTE
+    .map((swatch) => swatch.fill)
+    .filter((color) => !childColors.has(color));
+  const palette = choices.length > 0 ? choices : DISPLAY_PALETTE.map((swatch) => swatch.fill);
+  return palette[Math.floor(Math.random() * palette.length)] || LABEL_CARD_FILL;
+}
+
 function closeLabelModal() {
   uiState.pendingLabelRootId = null;
   uiState.pendingLabelEditId = null;
+  uiState.pendingParentGroupChildIds = [];
+  uiState.pendingParentGroupColor = null;
   uiState.labelModalPrimed = false;
   uiState.labelModalOpenedAt = 0;
   dom.labelModal.hidden = true;
@@ -1653,6 +1865,23 @@ function handleLabelInputKeydown(event) {
 
 function handleLabelSubmit(event) {
   event.preventDefault();
+  const parentChildIds = uniqueExistingCardIds(uiState.pendingParentGroupChildIds || []);
+  if (parentChildIds.length >= 2) {
+    const title = normalizeLabelText(dom.labelInput.value.trim() || "Untitled group");
+    const color = uiState.pendingParentGroupColor;
+    const parentId = createParentGroupLabel(parentChildIds, title, color);
+    closeLabelModal();
+    if (!parentId) {
+      showToast("Those groups could not be combined");
+      return;
+    }
+    setSelectedCard(parentId);
+    bringCardForward(parentId);
+    scheduleSave();
+    requestRender();
+    showToast("Groups combined");
+    return;
+  }
   const editId = uiState.pendingLabelEditId;
   if (editId && state.cards[editId]?.isLabel) {
     state.cards[editId].text = normalizeLabelText(dom.labelInput.value.trim() || "Untitled group");
@@ -1714,6 +1943,8 @@ function createLabelCard(title, seedRootId) {
     color: state.cards[seedRootId]?.color || LABEL_CARD_FILL,
     isLabel: true,
     labelRootId: seedRootId,
+    isParentGroup: false,
+    childLabelIds: [],
     collapsed: false,
     widthCap: MAX_LABEL_CARD_WIDTH,
     fontScale: 1,
@@ -1732,9 +1963,86 @@ function createLabelCard(title, seedRootId) {
   return id;
 }
 
+function createParentGroupLabel(childLabelIds, title = "Untitled group", color = null) {
+  if (!ENABLE_GROUP_OF_GROUPS) {
+    return null;
+  }
+  const children = uniqueExistingCardIds(childLabelIds).filter((childId) => {
+    return state.cards[childId]?.isLabel && !getParentLabelId(childId);
+  });
+  if (children.length < 2) {
+    return null;
+  }
+
+  const bounds = getBoundsForCardIds(children.flatMap((childId) => [
+    childId,
+    ...getParentGroupContainedCardIds(childId)
+  ]));
+  const width = LABEL_CARD_MIN_WIDTH;
+  const height = LABEL_CARD_MIN_HEIGHT;
+  const id = `card-${state.nextId++}`;
+  let labelY = bounds.y - height - LABEL_GROUP_GAP;
+  const controlBottom = (dom.chrome?.getBoundingClientRect().bottom || 0) + 8;
+  if (worldToScreen({ x: bounds.x, y: labelY }).y < controlBottom) {
+    labelY = bounds.y + bounds.h + LABEL_GROUP_GAP;
+  }
+  state.cards[id] = {
+    id,
+    parentId: null,
+    x: bounds.x + bounds.w / 2 - width / 2,
+    y: labelY,
+    w: width,
+    h: height,
+    color: isHex(color) ? color : getRandomParentGroupColor(children),
+    isLabel: true,
+    labelRootId: null,
+    isParentGroup: true,
+    childLabelIds: children,
+    collapsed: false,
+    widthCap: MAX_LABEL_CARD_WIDTH,
+    fontScale: 1,
+    fontWeight: "700",
+    fontStyle: "italic",
+    textDecoration: "none",
+    textAlign: "left",
+    fitMinWidth: LABEL_CARD_MIN_WIDTH,
+    fitMinHeight: LABEL_CARD_MIN_HEIGHT,
+    text: normalizeLabelText(title),
+    createdAt: new Date().toISOString(),
+    order: state.nextOrder++
+  };
+  ensureCardBelowMobileControls(id);
+  return id;
+}
+
 function toggleLabelCollapse(cardId) {
   const card = state.cards[cardId];
   if (!card || !isCollapsibleLabel(cardId)) {
+    return;
+  }
+  if (getChildLabelIds(cardId).length > 0) {
+    completeActiveGroupAnimation();
+    card.collapsed = !card.collapsed;
+    const token = ++uiState.groupAnimationSequence;
+    const maxDepth = Math.max(
+      1,
+      ...getParentGroupContainedCardIds(cardId).map((containedId) => {
+        return getCardCollapseDepth(containedId, cardId);
+      })
+    );
+    const duration = Math.max(0, maxDepth - 1) * PARENT_GROUP_ANIMATION_STEP_MS +
+      GROUP_ANIMATION_DURATION_MS + 40;
+    uiState.parentGroupAnimation = {
+      token,
+      labelId: cardId,
+      collapsing: card.collapsed,
+      startedAt: Date.now(),
+      duration
+    };
+    runParentGroupAnimationFrames(token);
+    setSelectedCard(cardId);
+    scheduleSave();
+    requestRender();
     return;
   }
   completeActiveGroupAnimation();
@@ -1779,6 +2087,20 @@ function toggleLabelCollapse(cardId) {
   runGroupAnimationFrames(animationToken, Date.now() + totalAnimationDuration);
   setSelectedCard(cardId);
   requestRender();
+}
+
+function runParentGroupAnimationFrames(token) {
+  const animation = uiState.parentGroupAnimation;
+  if (!animation || animation.token !== token) {
+    return;
+  }
+  requestRender();
+  if (Date.now() - animation.startedAt >= animation.duration) {
+    uiState.parentGroupAnimation = null;
+    requestRender();
+    return;
+  }
+  window.requestAnimationFrame(() => runParentGroupAnimationFrames(token));
 }
 
 function completeActiveGroupAnimation() {
@@ -1980,15 +2302,23 @@ function getUnfurlCollisionShift(currentRect, obstacleRect, motion) {
 
 function getCollapsedLabelOwnerId(cardId) {
   const card = state.cards[cardId];
-  if (!card || card.isLabel) {
+  if (!card) {
     return null;
   }
-
-  const rootId = getRootId(cardId);
   const labelCards = Object.values(state.cards)
     .filter((candidate) => candidate.isLabel && candidate.collapsed && candidate.id !== cardId)
     .sort((left, right) => right.order - left.order);
 
+  for (const label of labelCards) {
+    if (getParentGroupContainedCardIds(label.id).includes(cardId)) {
+      return label.id;
+    }
+  }
+  if (card.isLabel) {
+    return null;
+  }
+
+  const rootId = getRootId(cardId);
   for (const label of labelCards) {
     if (getLabelMemberRootIds(label.id).includes(rootId)) {
       return label.id;
@@ -2395,6 +2725,24 @@ function getCardCollapseTargetId(cardId, labelId) {
   if (!card || !label?.isLabel) {
     return null;
   }
+  if (label.isParentGroup) {
+    if (card.isLabel) {
+      const directParentId = getParentLabelId(cardId);
+      if (directParentId && (directParentId === labelId || getDescendantLabelIds(labelId).includes(directParentId))) {
+        return directParentId;
+      }
+      return getChildLabelIds(labelId).includes(cardId) ? labelId : null;
+    }
+    const rootId = getRootId(cardId);
+    const nearestOwningLabelId = getDescendantLabelIds(labelId)
+      .filter((childId) => getLabelMemberRootIds(childId).includes(rootId))
+      .sort((leftId, rightId) => {
+        return getDescendantLabelIds(leftId).length - getDescendantLabelIds(rightId).length;
+      })[0];
+    if (nearestOwningLabelId) {
+      return nearestOwningLabelId;
+    }
+  }
   if (card.parentId) {
     return card.parentId;
   }
@@ -2438,19 +2786,24 @@ function getCardCollapseDepth(cardId, labelId) {
 }
 
 function applyCardCollapseTiming(element, cardId, labelId) {
-  const memberIds = getLabelMemberRootIds(labelId).flatMap((rootId) => [
-    rootId,
-    ...getDescendants(rootId)
-  ]);
+  const memberIds = getChildLabelIds(labelId).length > 0
+    ? getParentGroupContainedCardIds(labelId)
+    : getLabelMemberRootIds(labelId).flatMap((rootId) => [
+        rootId,
+        ...getDescendants(rootId)
+      ]);
   const depth = getCardCollapseDepth(cardId, labelId);
   const maxDepth = Math.max(...memberIds.map((id) => getCardCollapseDepth(id, labelId)), depth);
+  const stepMs = state.cards[labelId]?.isParentGroup
+    ? PARENT_GROUP_ANIMATION_STEP_MS
+    : GROUP_ANIMATION_STEP_MS;
   element.style.setProperty(
     "--collapse-delay",
-    `${Math.max(0, maxDepth - depth) * GROUP_ANIMATION_STEP_MS}ms`
+    `${Math.max(0, maxDepth - depth) * stepMs}ms`
   );
   element.style.setProperty(
     "--expand-delay",
-    `${Math.max(0, depth - 1) * GROUP_ANIMATION_STEP_MS}ms`
+    `${Math.max(0, depth - 1) * stepMs}ms`
   );
 }
 
@@ -2463,6 +2816,9 @@ function getSubtreeBounds(cardId) {
   if (card.isLabel) {
     if (card.collapsed) {
       return getWorldRect(cardId);
+    }
+    if (getChildLabelIds(cardId).length > 0) {
+      return getBoundsForCardIds([cardId, ...getParentGroupContainedCardIds(cardId)]);
     }
     const memberRootIds = getLabelMemberRootIds(cardId);
     return getBoundsForCardIds([cardId, ...memberRootIds]);
@@ -2586,6 +2942,72 @@ function updateDraftRect() {
   dom.draftRect.style.top = `${rect.y}px`;
   dom.draftRect.style.width = `${Math.max(rect.w, 1)}px`;
   dom.draftRect.style.height = `${Math.max(rect.h, 1)}px`;
+}
+
+function startGroupSelection(event) {
+  interaction.mode = "group-select";
+  interaction.primaryPointerId = event.pointerId;
+  capturePointer(event.pointerId);
+  const startScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
+  interaction.groupSelection = {
+    startScreen,
+    currentScreen: startScreen,
+    startWorld: screenToWorld(startScreen),
+    currentWorld: screenToWorld(startScreen)
+  };
+  updateGroupSelectionRect();
+}
+
+function updateGroupSelection(event) {
+  if (!interaction.groupSelection) {
+    return;
+  }
+  const currentScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
+  interaction.groupSelection.currentScreen = currentScreen;
+  interaction.groupSelection.currentWorld = screenToWorld(currentScreen);
+  updateGroupSelectionRect();
+}
+
+function updateGroupSelectionRect() {
+  const selection = interaction.groupSelection;
+  if (!selection) {
+    dom.draftRect.hidden = true;
+    return;
+  }
+  const rect = normalizeRect(selection.startScreen, selection.currentScreen);
+  dom.draftRect.hidden = false;
+  dom.draftRect.style.left = `${rect.x}px`;
+  dom.draftRect.style.top = `${rect.y}px`;
+  dom.draftRect.style.width = `${Math.max(rect.w, 1)}px`;
+  dom.draftRect.style.height = `${Math.max(rect.h, 1)}px`;
+}
+
+function finishGroupSelection() {
+  const selection = interaction.groupSelection;
+  interaction.mode = null;
+  interaction.primaryPointerId = null;
+  interaction.groupSelection = null;
+  dom.draftRect.hidden = true;
+  if (!selection) {
+    requestRender();
+    return;
+  }
+
+  const selectionRect = normalizeRect(selection.startWorld, selection.currentWorld);
+  const childLabelIds = Object.values(state.cards)
+    .filter((card) => {
+      return card.isLabel &&
+        !getParentLabelId(card.id) &&
+        !isHiddenByCollapsedAncestor(card.id) &&
+        rectsOverlapWithGap(selectionRect, getWorldRect(card.id), 0);
+    })
+    .map((card) => card.id);
+  if (childLabelIds.length < 2) {
+    showToast("Draw around at least two group titles");
+    requestRender();
+    return;
+  }
+  openParentGroupModal(childLabelIds);
 }
 
 function startPan(event) {
@@ -3008,6 +3430,7 @@ function beginGestureIfNeeded() {
   interaction.drag = null;
   interaction.resize = null;
   interaction.brush = null;
+  interaction.groupSelection = null;
   dom.draftRect.hidden = true;
   interaction.gesture = {
     startDistance: distance,
@@ -3067,6 +3490,7 @@ function cancelActiveInteraction() {
   interaction.drag = null;
   interaction.resize = null;
   interaction.brush = null;
+  interaction.groupSelection = null;
   interaction.gesture = null;
   dom.draftRect.hidden = true;
   requestRender();
@@ -3273,6 +3697,9 @@ function applyColorToLabelGroup(labelId, color) {
   }
 
   label.color = color;
+  if (label.isParentGroup) {
+    return;
+  }
   getLabelMemberRootIds(labelId).forEach((rootId) => {
     [rootId, ...getDescendants(rootId)].forEach((cardId) => {
       const card = state.cards[cardId];
@@ -3290,7 +3717,7 @@ function syncLabelColorsForCard(cardId, color) {
   }
   getLabelIdsForRoot(getRootId(cardId)).forEach((labelId) => {
     const label = state.cards[labelId];
-    if (label?.isLabel) {
+    if (label?.isLabel && !label.isParentGroup) {
       label.color = color;
     }
   });
@@ -3550,9 +3977,12 @@ function wipeBoard() {
   uiState.selectedCardId = null;
   uiState.pendingLabelRootId = null;
   uiState.pendingLabelEditId = null;
+  uiState.pendingParentGroupChildIds = [];
+  uiState.pendingParentGroupColor = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
   uiState.groupAnimation = null;
+  uiState.parentGroupAnimation = null;
   uiState.groupDisplacementSnapshots.clear();
   cancelActiveInteraction();
   localStorage.removeItem(STORAGE_KEY);
@@ -3739,9 +4169,12 @@ async function handleImportFileChange(event) {
     uiState.selectedCardId = null;
     uiState.pendingLabelRootId = null;
     uiState.pendingLabelEditId = null;
+    uiState.pendingParentGroupChildIds = [];
+    uiState.pendingParentGroupColor = null;
     uiState.pendingDeleteCardId = null;
     uiState.pendingFocusCardId = null;
     uiState.groupAnimation = null;
+    uiState.parentGroupAnimation = null;
     uiState.groupDisplacementSnapshots.clear();
     cancelActiveInteraction();
     saveNow();
@@ -3876,7 +4309,7 @@ function syncCards() {
     body.setAttribute("aria-label", card.isLabel ? `${displayText || "Untitled"} group` : "Note text");
     if (card.isLabel && fitLabelCardToText(card.id, body)) {
       ensureCardBelowMobileControls(card.id);
-      if (isMobileLayout()) {
+      if (isMobileLayout() && !card.isParentGroup) {
         resolveMobileCardOverlap(card.id, { x: 0, y: 1 });
         ensureCardBelowMobileControls(card.id);
       }
@@ -3960,9 +4393,12 @@ function restoreUndoSnapshot() {
   uiState.selectedCardId = null;
   uiState.pendingLabelRootId = null;
   uiState.pendingLabelEditId = null;
+  uiState.pendingParentGroupChildIds = [];
+  uiState.pendingParentGroupColor = null;
   uiState.pendingDeleteCardId = null;
   uiState.pendingFocusCardId = null;
   uiState.groupAnimation = null;
+  uiState.parentGroupAnimation = null;
   uiState.groupDisplacementSnapshots.clear();
   cancelActiveInteraction();
   saveNow();
@@ -3977,7 +4413,7 @@ function renderConnections() {
   dom.connectionsLayer.setAttribute("width", `${width}`);
   dom.connectionsLayer.setAttribute("height", `${height}`);
 
-  const fragments = state.connections
+  const noteFragments = state.connections
     .map((connection) => {
       const fromId = state.cards[connection.fromId] ? getRootId(connection.fromId) : null;
       const toId = state.cards[connection.toId] ? getRootId(connection.toId) : null;
@@ -3994,6 +4430,13 @@ function renderConnections() {
         state.cards[toId]?.isLabel ||
         ((isHiddenByCollapsedAncestor(fromId) || isHiddenByCollapsedAncestor(toId)) &&
           collapsedLabelId !== (uiState.groupAnimation?.collapsing ? uiState.groupAnimation.labelId : null))
+      ) {
+        return "";
+      }
+
+      if (
+        uiState.parentGroupAnimation &&
+        (!isRenderedCardVisible(fromId) || !isRenderedCardVisible(toId))
       ) {
         return "";
       }
@@ -4037,7 +4480,48 @@ function renderConnections() {
     })
     .join("");
 
-  dom.connectionsLayer.innerHTML = fragments;
+  const groupFragments = ENABLE_GROUP_OF_GROUPS
+    ? Object.values(state.cards)
+        .filter((card) => card.isLabel && card.isParentGroup && !card.collapsed)
+        .flatMap((parent) => getChildLabelIds(parent.id).map((childId) => {
+          if (isHiddenByCollapsedAncestor(parent.id) || isHiddenByCollapsedAncestor(childId)) {
+            return "";
+          }
+          if (
+            uiState.parentGroupAnimation &&
+            (!isRenderedCardVisible(parent.id) || !isRenderedCardVisible(childId))
+          ) {
+            return "";
+          }
+          const fromPoint = getRenderedCardScreenCenter(parent.id);
+          const toPoint = getRenderedCardScreenCenter(childId);
+          return `<path class="connection-path group-connection-path" d="${buildSmoothPath([fromPoint, toPoint])}"></path>`;
+        }))
+        .join("")
+    : "";
+
+  dom.connectionsLayer.innerHTML = noteFragments + groupFragments;
+}
+
+function isRenderedCardVisible(cardId) {
+  const element = cardElements.get(cardId);
+  if (!element) {
+    return false;
+  }
+  const style = getComputedStyle(element);
+  if (Number.parseFloat(style.opacity) <= 0.001) {
+    return false;
+  }
+  if (!style.transform || style.transform === "none") {
+    return true;
+  }
+  const matrixMatch = /^matrix\(([^)]+)\)$/.exec(style.transform);
+  if (!matrixMatch) {
+    return true;
+  }
+  const values = matrixMatch[1].split(",").map(Number);
+  const renderedScale = Math.hypot(values[0] || 0, values[1] || 0);
+  return renderedScale >= 0.72;
 }
 
 function getRenderedCardScreenCenter(cardId) {

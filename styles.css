@@ -493,6 +493,7 @@ textarea {
 
 body[data-tool="card"] .card-body,
 body[data-tool="label"] .card-body,
+body[data-tool="group"] .card-body,
 body[data-tool="size"] .card-body,
 body[data-tool="delete"] .card-body,
 body[data-tool="brush"] .card-body {
@@ -522,6 +523,10 @@ body[data-tool="default"] .note-card.is-label .card-grip {
 }
 
 body[data-tool="brush"] .viewport {
+  cursor: crosshair;
+}
+
+body[data-tool="group"] .viewport {
   cursor: crosshair;
 }
 
