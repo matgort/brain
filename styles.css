@@ -505,6 +505,11 @@ body[data-tool="delete"] .card-grip {
   pointer-events: none;
 }
 
+body[data-tool="size"] .note-card:not(.is-label) .card-body {
+  pointer-events: auto;
+  cursor: text;
+}
+
 body[data-tool="default"] .viewport {
   cursor: crosshair;
 }

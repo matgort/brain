@@ -138,7 +138,8 @@ const uiState = {
   groupAnimation: null,
   parentGroupAnimation: null,
   groupAnimationSequence: 0,
-  groupDisplacementSnapshots: new Map()
+  groupDisplacementSnapshots: new Map(),
+  savedTextRange: null
 };
 
 const interaction = {
@@ -227,6 +228,7 @@ function bindEvents() {
   dom.titleCancelButton.addEventListener("click", closeTitleModal);
   dom.titleModal.addEventListener("click", handleTitleModalClick);
   dom.editTextButton.addEventListener("click", editSelectedCardText);
+  dom.textToolbar.addEventListener("pointerdown", preserveSelectedTextRange);
   dom.decreaseTextButton.addEventListener("click", () => adjustSelectedTextScale(0.88));
   dom.increaseTextButton.addEventListener("click", () => adjustSelectedTextScale(1.14));
   dom.resetTextButton.addEventListener("click", resetSelectedTextScale);
@@ -339,6 +341,9 @@ function normalizeStateSnapshot(parsed) {
               ? normalizeLabelText(card.text)
               : normalizeStoredCardText(card.text, parsed?.version))
           : "",
+      richText: !isLabel && typeof card.richText === "string"
+        ? sanitizeCardRichText(card.richText)
+        : "",
       createdAt: typeof card.createdAt === "string" ? card.createdAt : new Date().toISOString(),
       order: Math.max(1, toNumber(card.order, 1))
     };
@@ -742,7 +747,7 @@ function autoFitDeselectedCard(cardId) {
     return;
   }
 
-  card.text = readCardBodyText(body);
+  saveCardBodyContent(card, body);
   if (uiState.pendingFocusCardId === cardId) {
     uiState.pendingFocusCardId = null;
   }
@@ -868,10 +873,13 @@ function handlePointerDown(event) {
 
   if (uiState.currentTool === "size") {
     if (cardElement?.dataset.id && !state.cards[cardElement.dataset.id]?.isLabel) {
-      event.preventDefault();
       setSelectedCard(cardElement.dataset.id);
       bringCardForward(cardElement.dataset.id);
       requestRender();
+      if (bodyElement) {
+        return;
+      }
+      event.preventDefault();
     } else {
       setSelectedCard(null);
       requestRender();
@@ -1148,7 +1156,7 @@ function handleCardInput(event) {
   if (!card) {
     return;
   }
-  card.text = readCardBodyText(body);
+  saveCardBodyContent(card, body);
   growCardHeightToContent(id, body);
   scheduleSave();
 }
@@ -2003,6 +2011,7 @@ function createLabelCard(title, seedRootId) {
     fontStyle: "italic",
     textDecoration: "none",
     textAlign: "left",
+    richText: "",
     fitMinWidth: LABEL_CARD_MIN_WIDTH,
     fitMinHeight: LABEL_CARD_MIN_HEIGHT,
     text: normalizeLabelText(title),
@@ -2453,6 +2462,31 @@ function readCardBodyText(body) {
   return text.replace(/\n{2,}/g, (lineBreaks) => lineBreaks.slice(1));
 }
 
+function sanitizeCardRichText(html) {
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
+  const allowedTags = new Set(["B", "STRONG", "I", "EM", "U", "FONT", "DIV", "BR"]);
+  Array.from(template.content.querySelectorAll("*")).reverse().forEach((element) => {
+    if (!allowedTags.has(element.tagName)) {
+      element.replaceWith(...element.childNodes);
+      return;
+    }
+    const fontSize = element.tagName === "FONT"
+      ? clamp(Math.round(toNumber(element.getAttribute("size"), 3)), 1, 7)
+      : null;
+    Array.from(element.attributes).forEach((attribute) => element.removeAttribute(attribute.name));
+    if (fontSize !== null) {
+      element.setAttribute("size", String(fontSize));
+    }
+  });
+  return template.innerHTML;
+}
+
+function saveCardBodyContent(card, body) {
+  card.text = readCardBodyText(body);
+  card.richText = sanitizeCardRichText(body.innerHTML);
+}
+
 function normalizeLabelText(text) {
   return normalizeCardText(text).toUpperCase();
 }
@@ -2524,10 +2558,65 @@ function editSelectedCardText() {
   selection?.addRange(range);
 }
 
+function getHighlightedTextRange(body) {
+  const selection = window.getSelection();
+  if (!body || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  const container = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentElement;
+  return container && body.contains(container) ? range : null;
+}
+
+function preserveSelectedTextRange() {
+  const card = getSelectedEditableCard();
+  const body = card ? cardElements.get(card.id)?.querySelector(".card-body") : null;
+  const range = getHighlightedTextRange(body);
+  uiState.savedTextRange = range ? { cardId: card.id, range: range.cloneRange() } : null;
+}
+
+function restoreSelectedTextRange(card, body) {
+  const saved = uiState.savedTextRange;
+  if (!saved || saved.cardId !== card.id || !body.contains(saved.range.commonAncestorContainer)) {
+    return getHighlightedTextRange(body);
+  }
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(saved.range);
+  return saved.range;
+}
+
+function applyHighlightedTextCommand(command, value = null) {
+  const card = getSelectedEditableCard();
+  const body = card ? cardElements.get(card.id)?.querySelector(".card-body") : null;
+  if (!card || !body) {
+    return false;
+  }
+  body.focus({ preventScroll: true });
+  if (!restoreSelectedTextRange(card, body)) {
+    return false;
+  }
+  document.execCommand(command, false, value);
+  saveCardBodyContent(card, body);
+  growCardHeightToContent(card.id, body);
+  preserveSelectedTextRange();
+  scheduleSave();
+  requestRender();
+  return true;
+}
+
 function adjustSelectedTextScale(factor) {
   const card = getSelectedEditableCard();
   const body = card ? cardElements.get(card.id)?.querySelector(".card-body") : null;
   if (!card || !body) {
+    return;
+  }
+  if (restoreSelectedTextRange(card, body)) {
+    const currentSize = clamp(Math.round(toNumber(document.queryCommandValue("fontSize"), 3)), 1, 7);
+    const nextSize = clamp(currentSize + (factor > 1 ? 1 : -1), 1, 7);
+    applyHighlightedTextCommand("fontSize", String(nextSize));
     return;
   }
   const nextScale = clamp(getCardFontScale(card) * factor, MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
@@ -2544,11 +2633,16 @@ function resetSelectedTextScale() {
   if (!card || !body) {
     return;
   }
+  if (applyHighlightedTextCommand("removeFormat")) {
+    return;
+  }
   card.fontScale = 1;
   card.fontWeight = "400";
   card.fontStyle = "normal";
   card.textDecoration = "none";
   card.textAlign = "left";
+  card.richText = "";
+  body.innerText = card.text;
   body.style.setProperty("--card-font-scale", "1");
   applyCardTextFormatting(body, card);
   growCardHeightToContent(card.id, body);
@@ -2560,6 +2654,14 @@ function toggleSelectedTextFormat(property, activeValue, defaultValue) {
   const card = getSelectedEditableCard();
   const body = card ? cardElements.get(card.id)?.querySelector(".card-body") : null;
   if (!card || !body) {
+    return;
+  }
+  const commandByProperty = {
+    fontWeight: "bold",
+    fontStyle: "italic",
+    textDecoration: "underline"
+  };
+  if (commandByProperty[property] && applyHighlightedTextCommand(commandByProperty[property])) {
     return;
   }
   card[property] = card[property] === activeValue ? defaultValue : activeValue;
@@ -2601,7 +2703,7 @@ function finishEditingAndFitCard(cardId, body) {
     return;
   }
 
-  card.text = readCardBodyText(body);
+  saveCardBodyContent(card, body);
   fitCardToText(cardId, body);
   setSelectedCard(null, { skipAutoFit: true });
   if (uiState.pendingFocusCardId === cardId) {
@@ -2616,6 +2718,14 @@ function finishEditingAndFitCard(cardId, body) {
 function fitCardToText(cardId, body) {
   const card = state.cards[cardId];
   if (!card) {
+    return;
+  }
+
+  if (card.richText) {
+    card.h = Math.max(
+      getCardFitMinHeight(card),
+      Math.ceil(body.scrollHeight) + CARD_TEXT_INSET_Y * 2
+    );
     return;
   }
 
@@ -3583,6 +3693,7 @@ function createCard(rect) {
     fontStyle: "normal",
     textDecoration: "none",
     textAlign: "left",
+    richText: "",
     fitMinWidth: FIT_CARD_MIN_WIDTH,
     fitMinHeight: FIT_CARD_MIN_HEIGHT,
     text: "",
@@ -4191,7 +4302,13 @@ function downloadAndOpenBackupEmail(blob, filename) {
 function exportBoardAsText() {
   closeSaveModal();
   const sections = buildTextExportSections();
-  const content = [getBoardTitle(), ...sections].join("\n\n\n").trim();
+  const titleRule = `+${"=".repeat(66)}+`;
+  const content = [
+    titleRule,
+    `| BRAIN MAP: ${getBoardTitle()}`,
+    titleRule,
+    ...sections
+  ].join("\n\n").trim();
   const blob = new Blob([content], {
     type: "text/plain;charset=utf-8"
   });
@@ -4354,6 +4471,7 @@ function syncCards() {
       card.collapsed ? 1 : 0,
       (card.childLabelIds || []).join(","),
       displayText,
+      card.richText || "",
       card.fontScale || 1,
       card.fontWeight || "",
       card.fontStyle || "",
@@ -4399,8 +4517,15 @@ function syncCards() {
     element.style.setProperty("--card-rule", hexToRgba(displayInk, 0.22));
 
     const body = element.querySelector(".card-body");
-    if (document.activeElement !== body && body.innerText !== displayText) {
-      body.innerText = displayText;
+    if (document.activeElement !== body) {
+      if (!card.isLabel && card.richText) {
+        const safeRichText = sanitizeCardRichText(card.richText);
+        if (body.innerHTML !== safeRichText) {
+          body.innerHTML = safeRichText;
+        }
+      } else if (body.innerText !== displayText) {
+        body.innerText = displayText;
+      }
     }
     body.style.setProperty("--card-font-scale", String(getCardFontScale(card)));
     applyCardTextFormatting(body, card);
@@ -4763,35 +4888,84 @@ function getLabelExportNoteIds(labelId) {
 function buildTextExportSections() {
   const orderedCards = getOrderedExportCards();
   const orderedNotes = orderedCards.filter((card) => !card.isLabel);
-  const orderedNoteIds = orderedNotes.map((card) => card.id);
   const groupedNoteIds = new Set();
+  const visitedLabelIds = new Set();
   const sections = [];
 
-  orderedCards
-    .filter((card) => card.isLabel)
-    .forEach((labelCard) => {
-      const labelText = getCardExportText(labelCard);
-      const memberIdSet = new Set(getLabelExportNoteIds(labelCard.id));
-      if (!labelText && memberIdSet.size === 0) {
-        return;
+  const formatHeading = (heading, depth, strong = false) => {
+    const indent = "  ".repeat(depth);
+    const edge = strong ? "=" : "-";
+    const rule = `${indent}+${edge.repeat(Math.max(24, 66 - depth * 2))}+`;
+    return `${rule}\n${indent}| ${heading}\n${rule}`;
+  };
+
+  const formatCard = (cardText, cardNumber, depth) => {
+    const indent = "  ".repeat(depth);
+    const textLines = cardText.split("\n").map((line) => `${indent}| ${line}`);
+    return [
+      `${indent}.-- CARD ${String(cardNumber).padStart(2, "0")} ${"-".repeat(48)}.`,
+      ...textLines,
+      `${indent}'${"-".repeat(60)}'`
+    ].join("\n");
+  };
+
+  const buildLabelSection = (labelId, depth = 0) => {
+    if (visitedLabelIds.has(labelId) || !state.cards[labelId]?.isLabel) {
+      return "";
+    }
+    visitedLabelIds.add(labelId);
+    const label = state.cards[labelId];
+    const childLabelIds = getChildLabelIds(labelId);
+    const labelText = getCardExportText(label) || "UNTITLED GROUP";
+    const headingType = childLabelIds.length > 0 ? "GROUP COLLECTION" : "GROUP";
+    const parts = [formatHeading(`${headingType}: ${labelText}`, depth, childLabelIds.length > 0)];
+
+    if (childLabelIds.length > 0) {
+      childLabelIds
+        .slice()
+        .sort((leftId, rightId) => state.cards[leftId].order - state.cards[rightId].order)
+        .forEach((childId) => {
+          const childSection = buildLabelSection(childId, depth + 1);
+          if (childSection) {
+            parts.push(childSection);
+          }
+        });
+    } else {
+      const memberIdSet = new Set(getLabelExportNoteIds(labelId));
+      const noteCards = orderedNotes.filter((card) => memberIdSet.has(card.id));
+      noteCards.forEach((card) => groupedNoteIds.add(card.id));
+      const cardBlocks = noteCards
+        .map((card) => getCardExportText(card))
+        .filter(Boolean)
+        .map((cardText, index) => formatCard(cardText, index + 1, depth + 1));
+      if (cardBlocks.length > 0) {
+        parts.push(cardBlocks.join("\n\n"));
       }
+    }
+    return parts.join("\n\n");
+  };
 
-      const paragraphs = orderedNoteIds
-        .filter((cardId) => memberIdSet.has(cardId))
-        .map((cardId) => getCardExportText(state.cards[cardId]))
-        .filter(Boolean);
-
-      orderedNoteIds.forEach((cardId) => {
-        if (memberIdSet.has(cardId)) {
-          groupedNoteIds.add(cardId);
-        }
-      });
-
-      const sectionParts = [labelText, ...paragraphs].filter(Boolean);
-      if (sectionParts.length > 0) {
-        sections.push(sectionParts.join("\n\n"));
+  const orderedLabels = orderedCards.filter((card) => card.isLabel);
+  orderedLabels
+    .filter((label) => !getParentLabelId(label.id))
+    .forEach((label) => {
+      const section = buildLabelSection(label.id);
+      if (section) {
+        sections.push(section);
       }
     });
+
+  // Preserve malformed or legacy groups that are not reachable from a valid
+  // top-level parent instead of silently omitting their titles and notes.
+  orderedLabels.forEach((label) => {
+    if (visitedLabelIds.has(label.id)) {
+      return;
+    }
+    const section = buildLabelSection(label.id);
+    if (section) {
+      sections.push(section);
+    }
+  });
 
   const ungroupedParagraphs = orderedNotes
     .filter((card) => !groupedNoteIds.has(card.id))
@@ -4799,7 +4973,12 @@ function buildTextExportSections() {
     .filter(Boolean);
 
   if (ungroupedParagraphs.length > 0) {
-    sections.push(ungroupedParagraphs.join("\n\n"));
+    sections.push([
+      formatHeading("LOOSE CARDS", 0),
+      ungroupedParagraphs
+        .map((cardText, index) => formatCard(cardText, index + 1, 1))
+        .join("\n\n")
+    ].join("\n\n"));
   }
 
   return sections;
