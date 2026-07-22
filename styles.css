@@ -339,7 +339,7 @@ textarea {
   transform-origin: center center;
   will-change: transform, opacity;
   transition:
-    transform 280ms cubic-bezier(0.16, 1, 0.3, 1) var(--expand-delay, 0ms),
+    transform 230ms cubic-bezier(0.16, 1, 0.3, 1) var(--expand-delay, 0ms),
     opacity 0s linear var(--expand-delay, 0ms),
     box-shadow 180ms ease;
 }
@@ -347,8 +347,8 @@ textarea {
 .note-card.is-sucked-in {
   opacity: 0;
   transition:
-    transform 280ms cubic-bezier(0.16, 1, 0.3, 1) var(--collapse-delay, 0ms),
-    opacity 0s linear calc(var(--collapse-delay, 0ms) + var(--collapse-hide-after, 280ms)),
+    transform 230ms cubic-bezier(0.16, 1, 0.3, 1) var(--collapse-delay, 0ms),
+    opacity 0s linear calc(var(--collapse-delay, 0ms) + var(--collapse-hide-after, 230ms)),
     box-shadow 180ms ease;
 }
 
@@ -371,12 +371,21 @@ textarea {
   white-space: nowrap;
   text-overflow: ellipsis;
   font-size: calc(clamp(24px, 1.75vw, 30px) * var(--card-font-scale, 1));
-  font-style: italic;
-  font-weight: 650;
+  font-style: normal;
+  font-weight: 700;
   line-height: 1.02;
   text-transform: uppercase;
   cursor: pointer;
   transform: none;
+}
+
+.note-card.is-parent-group .card-body {
+  justify-content: center;
+  font-size: calc(clamp(24px, 1.75vw, 30px) * var(--card-font-scale, 1));
+  font-weight: 800;
+  font-style: normal;
+  letter-spacing: 0.055em;
+  text-align: center;
 }
 
 .note-card.is-label,
@@ -494,6 +503,7 @@ textarea {
 body[data-tool="card"] .card-body,
 body[data-tool="label"] .card-body,
 body[data-tool="group"] .card-body,
+body[data-tool="organize"] .card-body,
 body[data-tool="size"] .card-body,
 body[data-tool="delete"] .card-body,
 body[data-tool="brush"] .card-body {
@@ -532,6 +542,10 @@ body[data-tool="brush"] .viewport {
 }
 
 body[data-tool="group"] .viewport {
+  cursor: crosshair;
+}
+
+body[data-tool="organize"] .viewport {
   cursor: crosshair;
 }
 
@@ -730,8 +744,8 @@ body.is-space-panning .viewport {
   background: transparent;
   color: var(--modal-ink, var(--ink));
   font-size: clamp(1.8rem, 4.4vw, 3.15rem);
-  font-style: italic;
-  font-weight: 650;
+  font-style: normal;
+  font-weight: 700;
   line-height: 1.04;
   text-transform: uppercase;
   outline: none;

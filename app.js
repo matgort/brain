@@ -15,15 +15,20 @@ const FIT_CARD_MIN_WIDTH = MIN_CARD_WIDTH;
 const FIT_CARD_MIN_HEIGHT = MIN_CARD_HEIGHT;
 const LABEL_CARD_MIN_WIDTH = 120;
 const LABEL_CARD_MIN_HEIGHT = 64;
+const PARENT_LABEL_MIN_WIDTH = 160;
+const PARENT_LABEL_MIN_HEIGHT = 76;
 const CARD_TEXT_INSET_X = 16;
 const CARD_TEXT_INSET_Y = 15;
 const ZOOM_LIMITS = { min: 0.35, max: 2.8 };
 const CARD_GAP = 18;
 const LABEL_GROUP_GAP = 10;
 const NEW_CARD_GAP = 6;
-const GROUP_ANIMATION_DURATION_MS = 280;
-const GROUP_ANIMATION_STEP_MS = 235;
-const PARENT_GROUP_ANIMATION_STEP_MS = 92;
+const ORGANIZE_CARD_GAP = 10;
+const ORGANIZE_SECTION_GAP = 26;
+const ORGANIZE_PARENT_HEADER_GAP = 24;
+const GROUP_ANIMATION_DURATION_MS = 230;
+const GROUP_ANIMATION_STEP_MS = 190;
+const PARENT_GROUP_ANIMATION_STEP_MS = 75;
 const EXPORT_PADDING = 44;
 const DEFAULT_BACKGROUND_COLOR = "#d7d7d7";
 const NOTE_CARD_INK = "#000000";
@@ -297,6 +302,7 @@ function normalizeStateSnapshot(parsed) {
     }
 
     const isLabel = !!card.isLabel;
+    const isParentGroup = isLabel && ENABLE_GROUP_OF_GROUPS && !!card.isParentGroup;
     const widthCap = isLabel
       ? MAX_LABEL_CARD_WIDTH
       : Math.max(
@@ -307,8 +313,12 @@ function normalizeStateSnapshot(parsed) {
     const fontScale = isLabel
       ? 1
       : clamp(toNumber(card.fontScale, 1), MIN_NOTE_FONT_SCALE, MAX_NOTE_FONT_SCALE);
-    const fitMinWidth = isLabel ? LABEL_CARD_MIN_WIDTH : FIT_CARD_MIN_WIDTH;
-    const fitMinHeight = isLabel ? LABEL_CARD_MIN_HEIGHT : FIT_CARD_MIN_HEIGHT;
+    const fitMinWidth = isParentGroup
+      ? PARENT_LABEL_MIN_WIDTH
+      : isLabel ? LABEL_CARD_MIN_WIDTH : FIT_CARD_MIN_WIDTH;
+    const fitMinHeight = isParentGroup
+      ? PARENT_LABEL_MIN_HEIGHT
+      : isLabel ? LABEL_CARD_MIN_HEIGHT : FIT_CARD_MIN_HEIGHT;
 
     cards[card.id] = {
       id: String(card.id),
@@ -322,7 +332,7 @@ function normalizeStateSnapshot(parsed) {
       color: isHex(card.color) ? card.color : PALETTE[0].fill,
       isLabel,
       labelRootId: card.labelRootId ? String(card.labelRootId) : null,
-      isParentGroup: isLabel && ENABLE_GROUP_OF_GROUPS && !!card.isParentGroup,
+      isParentGroup,
       childLabelIds: isLabel && ENABLE_GROUP_OF_GROUPS && !!card.isParentGroup && Array.isArray(card.childLabelIds)
         ? Array.from(new Set(card.childLabelIds.map(String)))
         : [],
@@ -330,7 +340,7 @@ function normalizeStateSnapshot(parsed) {
       widthCap,
       fontScale,
       fontWeight: card.fontWeight === "700" ? "700" : "400",
-      fontStyle: card.fontStyle === "italic" ? "italic" : "normal",
+      fontStyle: isLabel ? "normal" : card.fontStyle === "italic" ? "italic" : "normal",
       textDecoration: card.textDecoration === "underline" ? "underline" : "none",
       textAlign: ["left", "center", "right"].includes(card.textAlign) ? card.textAlign : "left",
       fitMinWidth,
@@ -593,14 +603,14 @@ function toggleTool(tool) {
 }
 
 function setTool(tool) {
-  if (!["default", "brush", "label", "group", "size", "delete"].includes(tool)) {
+  if (!["default", "brush", "label", "group", "organize", "size", "delete"].includes(tool)) {
     return;
   }
   cancelActiveInteraction();
   uiState.mobileNewCardMode = false;
   uiState.colorTargetPending = false;
   uiState.paletteEditingCardId = null;
-  if (tool !== "group") {
+  if (tool !== "group" && tool !== "organize") {
     interaction.groupSelection = null;
     dom.draftRect.hidden = true;
   }
@@ -819,9 +829,9 @@ function handlePointerDown(event) {
     return;
   }
 
-  if (uiState.currentTool === "group") {
+  if (uiState.currentTool === "group" || uiState.currentTool === "organize") {
     event.preventDefault();
-    startGroupSelection(event);
+    startGroupSelection(event, uiState.currentTool);
     return;
   }
 
@@ -1980,8 +1990,8 @@ function createLabelCard(title, seedRootId) {
   }
 
   const bounds = getBoundsForCardIds(memberRootIds);
-  const width = LABEL_CARD_MIN_WIDTH;
-  const height = LABEL_CARD_MIN_HEIGHT;
+  const width = PARENT_LABEL_MIN_WIDTH;
+  const height = PARENT_LABEL_MIN_HEIGHT;
   const id = `card-${state.nextId++}`;
   let labelY = bounds.y - height - LABEL_GROUP_GAP;
 
@@ -2008,12 +2018,12 @@ function createLabelCard(title, seedRootId) {
     widthCap: MAX_LABEL_CARD_WIDTH,
     fontScale: 1,
     fontWeight: "700",
-    fontStyle: "italic",
+    fontStyle: "normal",
     textDecoration: "none",
     textAlign: "left",
     richText: "",
-    fitMinWidth: LABEL_CARD_MIN_WIDTH,
-    fitMinHeight: LABEL_CARD_MIN_HEIGHT,
+    fitMinWidth: PARENT_LABEL_MIN_WIDTH,
+    fitMinHeight: PARENT_LABEL_MIN_HEIGHT,
     text: normalizeLabelText(title),
     createdAt: new Date().toISOString(),
     order: state.nextOrder++
@@ -2062,7 +2072,7 @@ function createParentGroupLabel(childLabelIds, title = "Untitled group", color =
     widthCap: MAX_LABEL_CARD_WIDTH,
     fontScale: 1,
     fontWeight: "700",
-    fontStyle: "italic",
+    fontStyle: "normal",
     textDecoration: "none",
     textAlign: "left",
     fitMinWidth: LABEL_CARD_MIN_WIDTH,
@@ -2091,7 +2101,7 @@ function toggleLabelCollapse(cardId) {
       })
     );
     const duration = Math.max(0, maxDepth - 1) * PARENT_GROUP_ANIMATION_STEP_MS +
-      GROUP_ANIMATION_DURATION_MS + 40;
+      GROUP_ANIMATION_DURATION_MS + 28;
     uiState.parentGroupAnimation = {
       token,
       labelId: cardId,
@@ -2684,10 +2694,12 @@ function setSelectedTextAlignment(alignment) {
 }
 
 function applyCardTextFormatting(body, card) {
-  body.style.fontWeight = card.fontWeight || "400";
-  body.style.fontStyle = card.fontStyle || "normal";
+  body.style.fontWeight = card.isLabel
+    ? card.isParentGroup ? "800" : "700"
+    : card.fontWeight || "400";
+  body.style.fontStyle = card.isLabel ? "normal" : card.fontStyle || "normal";
   body.style.textDecoration = card.textDecoration || "none";
-  body.style.textAlign = card.textAlign || "left";
+  body.style.textAlign = card.isParentGroup ? "center" : card.textAlign || "left";
 }
 
 function getCardFitMinHeight(card) {
@@ -2756,7 +2768,7 @@ function growCardHeightToContent(cardId, body) {
   return true;
 }
 
-function fitLabelCardToText(cardId, body) {
+function fitLabelCardToText(cardId, body, options = {}) {
   const card = state.cards[cardId];
   if (!card?.isLabel || !body) {
     return false;
@@ -2768,8 +2780,10 @@ function fitLabelCardToText(cardId, body) {
     content,
     MAX_LABEL_CARD_WIDTH - CARD_TEXT_INSET_X * 2
   );
-  const nextWidth = clamp(width + CARD_TEXT_INSET_X * 2, LABEL_CARD_MIN_WIDTH, MAX_LABEL_CARD_WIDTH);
-  const nextHeight = Math.max(LABEL_CARD_MIN_HEIGHT, height + CARD_TEXT_INSET_Y * 2);
+  const minWidth = card.isParentGroup ? PARENT_LABEL_MIN_WIDTH : LABEL_CARD_MIN_WIDTH;
+  const minHeight = card.isParentGroup ? PARENT_LABEL_MIN_HEIGHT : LABEL_CARD_MIN_HEIGHT;
+  const nextWidth = clamp(width + CARD_TEXT_INSET_X * 2, minWidth, MAX_LABEL_CARD_WIDTH);
+  const nextHeight = Math.max(minHeight, height + CARD_TEXT_INSET_Y * 2);
 
   if (card.w === nextWidth && card.h === nextHeight) {
     return false;
@@ -2781,7 +2795,9 @@ function fitLabelCardToText(cardId, body) {
   card.h = nextHeight;
   card.x = centerX - nextWidth / 2;
   card.y = centerY - nextHeight / 2;
-  resolveCardPlacement(cardId, { x: 0, y: 0 });
+  if (!options.skipCollisionResolution) {
+    resolveCardPlacement(cardId, { x: 0, y: 0 });
+  }
   return true;
 }
 
@@ -2970,7 +2986,7 @@ function applyCardCollapseTiming(element, cardId, labelId) {
     : GROUP_ANIMATION_STEP_MS;
   element.style.setProperty(
     "--collapse-hide-after",
-    state.cards[labelId]?.isParentGroup ? "168ms" : `${GROUP_ANIMATION_DURATION_MS}ms`
+    state.cards[labelId]?.isParentGroup ? "138ms" : `${GROUP_ANIMATION_DURATION_MS}ms`
   );
   element.style.setProperty(
     "--collapse-delay",
@@ -3119,12 +3135,13 @@ function updateDraftRect() {
   dom.draftRect.style.height = `${Math.max(rect.h, 1)}px`;
 }
 
-function startGroupSelection(event) {
+function startGroupSelection(event, purpose = "group") {
   interaction.mode = "group-select";
   interaction.primaryPointerId = event.pointerId;
   capturePointer(event.pointerId);
   const startScreen = constrainMobileCanvasPoint(event.clientX, event.clientY);
   interaction.groupSelection = {
+    purpose,
     startScreen,
     currentScreen: startScreen,
     startWorld: screenToWorld(startScreen),
@@ -3169,6 +3186,10 @@ function finishGroupSelection() {
   }
 
   const selectionRect = normalizeRect(selection.startWorld, selection.currentWorld);
+  if (selection.purpose === "organize") {
+    organizeCardsInSelection(selectionRect);
+    return;
+  }
   const childLabelIds = Object.values(state.cards)
     .filter((card) => {
       return card.isLabel &&
@@ -3183,6 +3204,176 @@ function finishGroupSelection() {
     return;
   }
   openParentGroupModal(childLabelIds);
+}
+
+function organizeCardsInSelection(selectionRect) {
+  const selectedCards = Object.values(state.cards)
+    .filter((card) => {
+      return !isHiddenByCollapsedAncestor(card.id) &&
+        rectsOverlapWithGap(selectionRect, getWorldRect(card.id), 0);
+    })
+    .sort((left, right) => {
+      const leftRect = getWorldRect(left.id);
+      const rightRect = getWorldRect(right.id);
+      return leftRect.y - rightRect.y || leftRect.x - rightRect.x || left.order - right.order;
+    });
+
+  if (selectedCards.length < 2) {
+    showToast("Draw around at least two cards or group titles");
+    requestRender();
+    return;
+  }
+
+  const selectedIdSet = new Set(selectedCards.map((card) => card.id));
+  const selectedLabelIds = selectedCards
+    .filter((card) => card.isLabel)
+    .map((card) => card.id);
+  uniqueExistingCardIds(selectedLabelIds.flatMap((labelId) => [
+    labelId,
+    ...getDescendantLabelIds(labelId)
+  ])).forEach((labelId) => {
+    const body = cardElements.get(labelId)?.querySelector(".card-body");
+    if (body) {
+      fitLabelCardToText(labelId, body, { skipCollisionResolution: true });
+    }
+  });
+  const rootLabelIds = selectedLabelIds.filter((labelId) => {
+    let parentId = getParentLabelId(labelId);
+    while (parentId) {
+      if (selectedIdSet.has(parentId)) {
+        return false;
+      }
+      parentId = getParentLabelId(parentId);
+    }
+    return true;
+  });
+
+  const sectionPlans = rootLabelIds.map(buildOrganizeGroupPlan).filter(Boolean);
+  const coveredIds = new Set(sectionPlans.flatMap((plan) => plan.items.map((item) => item.id)));
+  const looseCards = selectedCards.filter((card) => !card.isLabel && !coveredIds.has(card.id));
+  if (looseCards.length > 0) {
+    sectionPlans.push(buildOrganizeCardGridPlan(looseCards.map((card) => card.id)));
+  }
+
+  const remainingLabels = selectedLabelIds.filter((labelId) => !coveredIds.has(labelId));
+  remainingLabels.forEach((labelId) => {
+    const plan = buildOrganizeGroupPlan(labelId);
+    if (plan) {
+      sectionPlans.push(plan);
+    }
+  });
+
+  if (sectionPlans.length === 0) {
+    showToast("No visible cards to organize");
+    requestRender();
+    return;
+  }
+
+  const packed = packOrganizePlans(sectionPlans, ORGANIZE_SECTION_GAP, "horizontal");
+  const originX = selectionRect.x + Math.max(0, (selectionRect.w - packed.w) / 2);
+  const originY = selectionRect.y + Math.max(0, (selectionRect.h - packed.h) / 2);
+  packed.items
+    .slice()
+    .sort((left, right) => getDepth(left.id) - getDepth(right.id))
+    .forEach((item) => setCardWorldPosition(item.id, originX + item.x, originY + item.y));
+
+  bringCardsForward(packed.items.map((item) => item.id));
+  setTool("default");
+  scheduleSave();
+  requestRender();
+  showToast(`Organized ${packed.items.length} cards`);
+}
+
+function buildOrganizeGroupPlan(labelId) {
+  const label = state.cards[labelId];
+  if (!label?.isLabel) {
+    return null;
+  }
+  const labelRect = getWorldRect(labelId);
+  if (label.collapsed) {
+    return { w: labelRect.w, h: labelRect.h, items: [{ id: labelId, x: 0, y: 0 }] };
+  }
+
+  const childLabelIds = getChildLabelIds(labelId);
+  const contentPlans = childLabelIds.length > 0
+    ? childLabelIds.map(buildOrganizeGroupPlan).filter(Boolean)
+    : [buildOrganizeCardGridPlan(getLabelExportNoteIds(labelId))].filter((plan) => plan.items.length > 0);
+  const content = contentPlans.length > 0
+    ? packOrganizePlans(
+        contentPlans,
+        ORGANIZE_SECTION_GAP,
+        childLabelIds.length > 0 ? "horizontal" : "vertical"
+      )
+    : { w: 0, h: 0, items: [] };
+  const width = Math.max(labelRect.w, content.w);
+  const contentY = labelRect.h + (
+    content.items.length > 0
+      ? label.isParentGroup ? ORGANIZE_PARENT_HEADER_GAP : ORGANIZE_CARD_GAP
+      : 0
+  );
+  const centerTopLevelTitle = label.isParentGroup && !getParentLabelId(labelId);
+  return {
+    w: width,
+    h: contentY + content.h,
+    items: [
+      { id: labelId, x: centerTopLevelTitle ? (width - labelRect.w) / 2 : 0, y: 0 },
+      ...content.items.map((item) => ({
+        id: item.id,
+        x: item.x,
+        y: contentY + item.y
+      }))
+    ]
+  };
+}
+
+function buildOrganizeCardGridPlan(cardIds) {
+  const plans = uniqueExistingCardIds(cardIds)
+    .filter((cardId) => !state.cards[cardId]?.isLabel && !isHiddenByCollapsedAncestor(cardId))
+    .map((cardId) => {
+      const rect = getWorldRect(cardId);
+      return { w: rect.w, h: rect.h, items: [{ id: cardId, x: 0, y: 0 }] };
+    });
+  return packOrganizePlans(plans, ORGANIZE_CARD_GAP);
+}
+
+function packOrganizePlans(plans, gap, direction = "vertical") {
+  const validPlans = plans.filter((plan) => plan && plan.items.length > 0);
+  if (validPlans.length === 0) {
+    return { w: 0, h: 0, items: [] };
+  }
+  const columns = direction === "horizontal"
+    ? Math.min(4, validPlans.length)
+    : Math.min(3, Math.max(1, Math.round(Math.sqrt(validPlans.length / 1.65))));
+  const rows = Math.ceil(validPlans.length / columns);
+  const columnWidths = Array(columns).fill(0);
+  const rowHeights = Array(rows).fill(0);
+  validPlans.forEach((plan, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    columnWidths[column] = Math.max(columnWidths[column], plan.w);
+    rowHeights[row] = Math.max(rowHeights[row], plan.h);
+  });
+  const columnX = columnWidths.map((_, index) => {
+    return columnWidths.slice(0, index).reduce((sum, width) => sum + width, 0) + gap * index;
+  });
+  const rowY = rowHeights.map((_, index) => {
+    return rowHeights.slice(0, index).reduce((sum, height) => sum + height, 0) + gap * index;
+  });
+  const items = [];
+  validPlans.forEach((plan, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const offsetX = columnX[column];
+    const offsetY = rowY[row];
+    plan.items.forEach((item) => {
+      items.push({ id: item.id, x: offsetX + item.x, y: offsetY + item.y });
+    });
+  });
+  return {
+    w: columnWidths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, columns - 1),
+    h: rowHeights.reduce((sum, height) => sum + height, 0) + gap * Math.max(0, rows - 1),
+    items
+  };
 }
 
 function startPan(event) {
@@ -3750,7 +3941,11 @@ function setCardWorldRect(cardId, rect) {
   card.x = rect.x - parentRect.x;
   card.y = rect.y - parentRect.y;
   card.w = card.isLabel
-    ? clamp(rect.w, LABEL_CARD_MIN_WIDTH, MAX_LABEL_CARD_WIDTH)
+    ? clamp(
+        rect.w,
+        card.isParentGroup ? PARENT_LABEL_MIN_WIDTH : LABEL_CARD_MIN_WIDTH,
+        MAX_LABEL_CARD_WIDTH
+      )
     : Math.max(MIN_CARD_WIDTH, rect.w);
   if (!card.isLabel) {
     card.widthCap = Math.max(toNumber(card.widthCap, MAX_NOTE_CARD_WIDTH), card.w);
@@ -4495,6 +4690,7 @@ function syncCards() {
 
     element.classList.toggle("is-selected", selected);
     element.classList.toggle("is-label", !!card.isLabel);
+    element.classList.toggle("is-parent-group", !!card.isParentGroup);
     element.classList.toggle("is-collapsed", !!card.collapsed);
     element.classList.toggle("is-sucked-in", hiddenByLabel);
     if (collapsedLabelId) {
@@ -5152,14 +5348,17 @@ function drawExportCard(ctx, card, rect) {
   ctx.save();
   ctx.fillStyle = ink;
   const exportFontSize = card.isLabel ? 28 : 20 * getCardFontScale(card);
-  ctx.font = card.isLabel
-    ? `italic 650 28px Georgia, "Times New Roman", serif`
+  ctx.font = card.isParentGroup
+    ? `800 ${exportFontSize}px Georgia, "Times New Roman", serif`
+    : card.isLabel
+      ? `700 ${exportFontSize}px Georgia, "Times New Roman", serif`
     : `400 ${exportFontSize}px Georgia, "Times New Roman", serif`;
   ctx.textBaseline = "top";
+  ctx.textAlign = card.isParentGroup ? "center" : "left";
   drawExportCardText(
     ctx,
     displayText,
-    rect.x + CARD_TEXT_INSET_X,
+    card.isParentGroup ? rect.x + rect.w / 2 : rect.x + CARD_TEXT_INSET_X,
     rect.y + CARD_TEXT_INSET_Y,
     rect.w - CARD_TEXT_INSET_X * 2,
     rect.h - CARD_TEXT_INSET_Y * 2,
