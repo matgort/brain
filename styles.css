@@ -348,7 +348,7 @@ textarea {
   opacity: 0;
   transition:
     transform 280ms cubic-bezier(0.16, 1, 0.3, 1) var(--collapse-delay, 0ms),
-    opacity 0s linear calc(var(--collapse-delay, 0ms) + 280ms),
+    opacity 0s linear calc(var(--collapse-delay, 0ms) + var(--collapse-hide-after, 280ms)),
     box-shadow 180ms ease;
 }
 

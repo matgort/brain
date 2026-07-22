@@ -27,7 +27,6 @@ const PARENT_GROUP_ANIMATION_STEP_MS = 105;
 const EXPORT_PADDING = 44;
 const DEFAULT_BACKGROUND_COLOR = "#d7d7d7";
 const NOTE_CARD_INK = "#000000";
-const MIN_BLACK_TEXT_CONTRAST = 8;
 const DEFAULT_DARK_INK = "#231423";
 const DEFAULT_LIGHT_INK = "#fbf2f4";
 const LABEL_CARD_FILL = DEFAULT_DARK_INK;
@@ -58,7 +57,7 @@ const RAW_PALETTE = [
 ];
 const PALETTE = RAW_PALETTE.map((swatch) => ({
   ...swatch,
-  ink: getReadableInk(swatch.fill)
+  ink: NOTE_CARD_INK
 }));
 const DISPLAY_PALETTE = PALETTE;
 const dom = {
@@ -1974,10 +1973,10 @@ function createParentGroupLabel(childLabelIds, title = "Untitled group", color =
     return null;
   }
 
-  const bounds = getBoundsForCardIds(children.flatMap((childId) => [
-    childId,
-    ...getParentGroupContainedCardIds(childId)
-  ]));
+  // Parent titles belong beside the selected title cluster. Using every
+  // contained note here can place the title hundreds of pixels away when a
+  // child group spans a large or mostly hidden area of the canvas.
+  const bounds = getBoundsForCardIds(children);
   const width = LABEL_CARD_MIN_WIDTH;
   const height = LABEL_CARD_MIN_HEIGHT;
   const id = `card-${state.nextId++}`;
@@ -2673,7 +2672,7 @@ function applyPopupTheme(modal, fillOverride = null) {
     return;
   }
   const fill = isHex(fillOverride) ? fillOverride : getMostRecentNoteColor();
-  const ink = hasReadableBlackText(fill) ? NOTE_CARD_INK : getReadableInk(fill);
+  const ink = NOTE_CARD_INK;
   modal.style.setProperty("--modal-fill", fill);
   modal.style.setProperty("--modal-ink", ink);
   modal.style.setProperty("--modal-ink-soft", hexToRgba(ink, 0.72));
@@ -2797,6 +2796,10 @@ function applyCardCollapseTiming(element, cardId, labelId) {
   const stepMs = state.cards[labelId]?.isParentGroup
     ? PARENT_GROUP_ANIMATION_STEP_MS
     : GROUP_ANIMATION_STEP_MS;
+  element.style.setProperty(
+    "--collapse-hide-after",
+    state.cards[labelId]?.isParentGroup ? "168ms" : `${GROUP_ANIMATION_DURATION_MS}ms`
+  );
   element.style.setProperty(
     "--collapse-delay",
     `${Math.max(0, maxDepth - depth) * stepMs}ms`
@@ -4290,7 +4293,7 @@ function syncCards() {
     element.style.transform = hiddenByLabel ? getCardCollapseTransform(card.id) : "";
     element.style.setProperty("--card-fill", displayFill);
     element.style.setProperty("--card-border", hexToRgba(displayFill, 0.18));
-    const displayInk = hasReadableBlackText(displayFill) ? NOTE_CARD_INK : getReadableInk(displayFill);
+    const displayInk = NOTE_CARD_INK;
     element.style.setProperty("--card-ink", displayInk);
     element.style.setProperty("--card-placeholder", hexToRgba(displayInk, 0.48));
     element.style.setProperty("--card-rule", hexToRgba(displayInk, 0.22));
@@ -4809,7 +4812,7 @@ function drawExportCard(ctx, card, rect) {
     : card.isLabel
       ? LABEL_CARD_FILL
       : PALETTE[0].fill;
-  const ink = hasReadableBlackText(displayFill) ? NOTE_CARD_INK : getReadableInk(displayFill);
+  const ink = NOTE_CARD_INK;
   const displayText = card.isLabel ? normalizeLabelText(card.text) : card.text;
 
   ctx.save();
@@ -5048,24 +5051,6 @@ function getReadableInk(fill) {
   const { r, g, b } = hexToRgb(fill);
   const luminance = (r * 0.299 + g * 0.587 + b * 0.114) / 255;
   return luminance > 0.62 ? DEFAULT_DARK_INK : DEFAULT_LIGHT_INK;
-}
-
-function contrastRatioWithBlack(fill) {
-  if (!isHex(fill)) {
-    return Infinity;
-  }
-
-  const { r, g, b } = hexToRgb(fill);
-  const [lr, lg, lb] = [r, g, b].map((channel) => {
-    const value = channel / 255;
-    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  });
-  const luminance = 0.2126 * lr + 0.7152 * lg + 0.0722 * lb;
-  return (luminance + 0.05) / 0.05;
-}
-
-function hasReadableBlackText(fill) {
-  return contrastRatioWithBlack(fill) >= MIN_BLACK_TEXT_CONTRAST;
 }
 
 function isDarkColor(fill) {
