@@ -23,7 +23,7 @@ const LABEL_GROUP_GAP = 10;
 const NEW_CARD_GAP = 6;
 const GROUP_ANIMATION_DURATION_MS = 280;
 const GROUP_ANIMATION_STEP_MS = 235;
-const PARENT_GROUP_ANIMATION_STEP_MS = 105;
+const PARENT_GROUP_ANIMATION_STEP_MS = 92;
 const EXPORT_PADDING = 44;
 const DEFAULT_BACKGROUND_COLOR = "#d7d7d7";
 const NOTE_CARD_INK = "#000000";
@@ -155,12 +155,37 @@ const interaction = {
 };
 
 const cardElements = new Map();
+const cardRenderSignatures = new Map();
 let state = loadState();
 let renderQueued = false;
 let saveTimer = 0;
 let isSpacePressed = false;
 let toastTimer = 0;
 let undoSnapshot = null;
+let hierarchyReadCache = null;
+let lastConnectionsMarkup = "";
+
+function withHierarchyReadCache(callback) {
+  const ownsCache = !hierarchyReadCache;
+  if (ownsCache) {
+    hierarchyReadCache = {
+      memberRootIds: new Map(),
+      childLabelIds: new Map(),
+      parentLabelIds: new Map(),
+      descendantLabelIds: new Map(),
+      descendantVisiting: new Set(),
+      containedCardIds: new Map(),
+      collapsedOwnerIds: new Map()
+    };
+  }
+  try {
+    return callback();
+  } finally {
+    if (ownsCache) {
+      hierarchyReadCache = null;
+    }
+  }
+}
 
 boot();
 
@@ -1373,62 +1398,89 @@ function repairParentGroupsAfterDeletion(removedCardIdSet) {
 }
 
 function getLabelMemberRootIds(labelId) {
+  if (hierarchyReadCache?.memberRootIds.has(labelId)) {
+    return hierarchyReadCache.memberRootIds.get(labelId);
+  }
   const label = state.cards[labelId];
   if (!label?.isLabel) {
     return [];
   }
 
+  let memberRootIds;
   if (ENABLE_GROUP_OF_GROUPS && label.childLabelIds?.length) {
-    return uniqueExistingCardIds(
+    memberRootIds = uniqueExistingCardIds(
       label.childLabelIds.flatMap((childId) => getLabelMemberRootIds(childId))
     );
+  } else if (!label.labelRootId || !state.cards[label.labelRootId]) {
+    memberRootIds = [];
+  } else {
+    memberRootIds = collectConnectedRootIds(label.labelRootId).filter((rootId) => {
+      const card = state.cards[rootId];
+      return !!card && !card.isLabel;
+    });
   }
-  if (!label.labelRootId || !state.cards[label.labelRootId]) {
-    return [];
-  }
-
-  return collectConnectedRootIds(label.labelRootId).filter((rootId) => {
-    const card = state.cards[rootId];
-    return !!card && !card.isLabel;
-  });
+  hierarchyReadCache?.memberRootIds.set(labelId, memberRootIds);
+  return memberRootIds;
 }
 
 function getChildLabelIds(labelId) {
+  if (hierarchyReadCache?.childLabelIds.has(labelId)) {
+    return hierarchyReadCache.childLabelIds.get(labelId);
+  }
   if (!ENABLE_GROUP_OF_GROUPS || !state.cards[labelId]?.isLabel || !state.cards[labelId]?.isParentGroup) {
     return [];
   }
-  return uniqueExistingCardIds(state.cards[labelId].childLabelIds || []).filter((childId) => {
+  const childLabelIds = uniqueExistingCardIds(state.cards[labelId].childLabelIds || []).filter((childId) => {
     return state.cards[childId]?.isLabel;
   });
+  hierarchyReadCache?.childLabelIds.set(labelId, childLabelIds);
+  return childLabelIds;
 }
 
 function getParentLabelId(labelId) {
+  if (hierarchyReadCache?.parentLabelIds.has(labelId)) {
+    return hierarchyReadCache.parentLabelIds.get(labelId);
+  }
   if (!ENABLE_GROUP_OF_GROUPS) {
     return null;
   }
-  return Object.values(state.cards).find((card) => {
+  const parentLabelId = Object.values(state.cards).find((card) => {
     return card.isLabel && getChildLabelIds(card.id).includes(labelId);
   })?.id || null;
+  hierarchyReadCache?.parentLabelIds.set(labelId, parentLabelId);
+  return parentLabelId;
 }
 
-function getDescendantLabelIds(labelId, visited = new Set()) {
-  if (visited.has(labelId)) {
+function getDescendantLabelIds(labelId, visited = null) {
+  if (hierarchyReadCache?.descendantLabelIds.has(labelId)) {
+    return hierarchyReadCache.descendantLabelIds.get(labelId);
+  }
+  const visiting = hierarchyReadCache?.descendantVisiting || visited || new Set();
+  if (visiting.has(labelId)) {
     return [];
   }
-  visited.add(labelId);
-  return getChildLabelIds(labelId).flatMap((childId) => [
+  visiting.add(labelId);
+  const descendantLabelIds = uniqueExistingCardIds(getChildLabelIds(labelId).flatMap((childId) => [
     childId,
-    ...getDescendantLabelIds(childId, visited)
-  ]);
+    ...getDescendantLabelIds(childId, visiting)
+  ]));
+  visiting.delete(labelId);
+  hierarchyReadCache?.descendantLabelIds.set(labelId, descendantLabelIds);
+  return descendantLabelIds;
 }
 
 function getParentGroupContainedCardIds(labelId) {
+  if (hierarchyReadCache?.containedCardIds.has(labelId)) {
+    return hierarchyReadCache.containedCardIds.get(labelId);
+  }
   const labelIds = getDescendantLabelIds(labelId);
   const noteIds = getLabelMemberRootIds(labelId).flatMap((rootId) => [
     rootId,
     ...getDescendants(rootId)
   ]);
-  return uniqueExistingCardIds([...labelIds, ...noteIds]);
+  const containedCardIds = uniqueExistingCardIds([...labelIds, ...noteIds]);
+  hierarchyReadCache?.containedCardIds.set(labelId, containedCardIds);
+  return containedCardIds;
 }
 
 function getLabelIdsForRoot(rootId) {
@@ -2093,13 +2145,16 @@ function runParentGroupAnimationFrames(token) {
   if (!animation || animation.token !== token) {
     return;
   }
-  requestRender();
   if (Date.now() - animation.startedAt >= animation.duration) {
     uiState.parentGroupAnimation = null;
     requestRender();
     return;
   }
-  window.requestAnimationFrame(() => runParentGroupAnimationFrames(token));
+  // Card transforms are handled by CSS. Re-rendering the entire application on
+  // every animation frame makes deep hierarchies unnecessarily expensive, so
+  // only refresh the connector layer at a modest cadence while cards move.
+  renderConnections();
+  window.setTimeout(() => runParentGroupAnimationFrames(token), 48);
 }
 
 function completeActiveGroupAnimation() {
@@ -2300,6 +2355,9 @@ function getUnfurlCollisionShift(currentRect, obstacleRect, motion) {
 }
 
 function getCollapsedLabelOwnerId(cardId) {
+  if (hierarchyReadCache?.collapsedOwnerIds.has(cardId)) {
+    return hierarchyReadCache.collapsedOwnerIds.get(cardId);
+  }
   const card = state.cards[cardId];
   if (!card) {
     return null;
@@ -2310,20 +2368,24 @@ function getCollapsedLabelOwnerId(cardId) {
 
   for (const label of labelCards) {
     if (getParentGroupContainedCardIds(label.id).includes(cardId)) {
+      hierarchyReadCache?.collapsedOwnerIds.set(cardId, label.id);
       return label.id;
     }
   }
   if (card.isLabel) {
+    hierarchyReadCache?.collapsedOwnerIds.set(cardId, null);
     return null;
   }
 
   const rootId = getRootId(cardId);
   for (const label of labelCards) {
     if (getLabelMemberRootIds(label.id).includes(rootId)) {
+      hierarchyReadCache?.collapsedOwnerIds.set(cardId, label.id);
       return label.id;
     }
   }
 
+  hierarchyReadCache?.collapsedOwnerIds.set(cardId, null);
   return null;
 }
 
@@ -4213,17 +4275,19 @@ function requestRender() {
 }
 
 function render() {
-  syncPageTitle();
-  syncBoardTheme();
-  applyToolState();
-  syncPalette();
-  syncPaletteSizing();
-  syncPaletteVisibility();
-  dom.scene.style.transform = `translate(${state.camera.x}px, ${state.camera.y}px) scale(${state.camera.scale})`;
-  syncCards();
-  renderConnections();
-  renderBrushPreview();
-  focusPendingCard();
+  withHierarchyReadCache(() => {
+    syncPageTitle();
+    syncBoardTheme();
+    applyToolState();
+    syncPalette();
+    syncPaletteSizing();
+    syncPaletteVisibility();
+    dom.scene.style.transform = `translate(${state.camera.x}px, ${state.camera.y}px) scale(${state.camera.scale})`;
+    syncCards();
+    renderConnections();
+    renderBrushPreview();
+    focusPendingCard();
+  });
 }
 
 function syncPageTitle() {
@@ -4248,6 +4312,7 @@ function syncCards() {
     if (!existingIds.has(id)) {
       element.remove();
       cardElements.delete(id);
+      cardRenderSignatures.delete(id);
     }
   });
 
@@ -4275,6 +4340,41 @@ function syncCards() {
     }
 
     const selected = card.id === uiState.selectedCardId;
+    const displayText = card.isLabel ? normalizeLabelText(card.text) : card.text;
+    const rect = getWorldRect(card.id);
+    const renderSignature = [
+      card.x,
+      card.y,
+      card.w,
+      card.h,
+      card.order,
+      card.parentId || "",
+      card.isLabel ? 1 : 0,
+      card.isParentGroup ? 1 : 0,
+      card.collapsed ? 1 : 0,
+      (card.childLabelIds || []).join(","),
+      displayText,
+      card.fontScale || 1,
+      card.fontWeight || "",
+      card.fontStyle || "",
+      card.textDecoration || "",
+      card.textAlign || "",
+      displayFill,
+      hiddenByLabel ? 1 : 0,
+      collapsedLabelId || "",
+      layeredLabelId || "",
+      selected ? 1 : 0,
+      uiState.groupAnimation?.token || "",
+      uiState.parentGroupAnimation?.token || "",
+      state.connections.length,
+      rect.x,
+      rect.y
+    ].join("\u001f");
+    if (cardRenderSignatures.get(card.id) === renderSignature) {
+      return;
+    }
+    cardRenderSignatures.set(card.id, renderSignature);
+
     element.classList.toggle("is-selected", selected);
     element.classList.toggle("is-label", !!card.isLabel);
     element.classList.toggle("is-collapsed", !!card.collapsed);
@@ -4299,7 +4399,6 @@ function syncCards() {
     element.style.setProperty("--card-rule", hexToRgba(displayInk, 0.22));
 
     const body = element.querySelector(".card-body");
-    const displayText = card.isLabel ? normalizeLabelText(card.text) : card.text;
     if (document.activeElement !== body && body.innerText !== displayText) {
       body.innerText = displayText;
     }
@@ -4319,7 +4418,6 @@ function syncCards() {
       resizedLabelCard = true;
     }
 
-    const rect = getWorldRect(card.id);
     element.style.left = `${rect.x}px`;
     element.style.top = `${rect.y}px`;
     element.style.width = `${card.w}px`;
@@ -4410,18 +4508,53 @@ function restoreUndoSnapshot() {
 }
 
 function renderConnections() {
+  return withHierarchyReadCache(renderConnectionsWithCache);
+}
+
+function renderConnectionsWithCache() {
   const width = dom.viewport.clientWidth;
   const height = dom.viewport.clientHeight;
   dom.connectionsLayer.setAttribute("viewBox", `0 0 ${width} ${height}`);
   dom.connectionsLayer.setAttribute("width", `${width}`);
   dom.connectionsLayer.setAttribute("height", `${height}`);
+  const collapsedOwnerCache = new Map();
+  const hiddenCardCache = new Map();
+  const renderedCenterCache = new Map();
+  const renderedVisibilityCache = new Map();
+  const viewportRect = uiState.groupAnimation || uiState.parentGroupAnimation
+    ? dom.viewport.getBoundingClientRect()
+    : null;
+  const getCachedCollapsedOwner = (cardId) => {
+    if (!collapsedOwnerCache.has(cardId)) {
+      collapsedOwnerCache.set(cardId, getCollapsedLabelOwnerId(cardId));
+    }
+    return collapsedOwnerCache.get(cardId);
+  };
+  const getCachedHiddenState = (cardId) => {
+    if (!hiddenCardCache.has(cardId)) {
+      hiddenCardCache.set(cardId, isHiddenByCollapsedAncestor(cardId));
+    }
+    return hiddenCardCache.get(cardId);
+  };
+  const getCachedRenderedCenter = (cardId) => {
+    if (!renderedCenterCache.has(cardId)) {
+      renderedCenterCache.set(cardId, getRenderedCardScreenCenter(cardId, viewportRect));
+    }
+    return renderedCenterCache.get(cardId);
+  };
+  const getCachedRenderedVisibility = (cardId) => {
+    if (!renderedVisibilityCache.has(cardId)) {
+      renderedVisibilityCache.set(cardId, isRenderedCardVisible(cardId));
+    }
+    return renderedVisibilityCache.get(cardId);
+  };
 
   const noteFragments = state.connections
     .map((connection) => {
       const fromId = state.cards[connection.fromId] ? getRootId(connection.fromId) : null;
       const toId = state.cards[connection.toId] ? getRootId(connection.toId) : null;
-      const fromCollapsedLabelId = fromId ? getCollapsedLabelOwnerId(fromId) : null;
-      const toCollapsedLabelId = toId ? getCollapsedLabelOwnerId(toId) : null;
+      const fromCollapsedLabelId = fromId ? getCachedCollapsedOwner(fromId) : null;
+      const toCollapsedLabelId = toId ? getCachedCollapsedOwner(toId) : null;
       const collapsedLabelId = fromCollapsedLabelId && fromCollapsedLabelId === toCollapsedLabelId
         ? fromCollapsedLabelId
         : null;
@@ -4431,7 +4564,7 @@ function renderConnections() {
         fromId === toId ||
         state.cards[fromId]?.isLabel ||
         state.cards[toId]?.isLabel ||
-        ((isHiddenByCollapsedAncestor(fromId) || isHiddenByCollapsedAncestor(toId)) &&
+        ((getCachedHiddenState(fromId) || getCachedHiddenState(toId)) &&
           collapsedLabelId !== (uiState.groupAnimation?.collapsing ? uiState.groupAnimation.labelId : null))
       ) {
         return "";
@@ -4439,7 +4572,7 @@ function renderConnections() {
 
       if (
         uiState.parentGroupAnimation &&
-        (!isRenderedCardVisible(fromId) || !isRenderedCardVisible(toId))
+        (!getCachedRenderedVisibility(fromId) || !getCachedRenderedVisibility(toId))
       ) {
         return "";
       }
@@ -4454,8 +4587,8 @@ function renderConnections() {
         }
       }
 
-      const fromPoint = getRenderedCardScreenCenter(fromId);
-      const toPoint = getRenderedCardScreenCenter(toId);
+      const fromPoint = getCachedRenderedCenter(fromId);
+      const toPoint = getCachedRenderedCenter(toId);
       const dx = toPoint.x - fromPoint.x;
       const dy = toPoint.y - fromPoint.y;
       const viaPoints = Array.isArray(connection.shape) && connection.shape.length > 0
@@ -4487,23 +4620,27 @@ function renderConnections() {
     ? Object.values(state.cards)
         .filter((card) => card.isLabel && card.isParentGroup && !card.collapsed)
         .flatMap((parent) => getChildLabelIds(parent.id).map((childId) => {
-          if (isHiddenByCollapsedAncestor(parent.id) || isHiddenByCollapsedAncestor(childId)) {
+          if (getCachedHiddenState(parent.id) || getCachedHiddenState(childId)) {
             return "";
           }
           if (
             uiState.parentGroupAnimation &&
-            (!isRenderedCardVisible(parent.id) || !isRenderedCardVisible(childId))
+            (!getCachedRenderedVisibility(parent.id) || !getCachedRenderedVisibility(childId))
           ) {
             return "";
           }
-          const fromPoint = getRenderedCardScreenCenter(parent.id);
-          const toPoint = getRenderedCardScreenCenter(childId);
+          const fromPoint = getCachedRenderedCenter(parent.id);
+          const toPoint = getCachedRenderedCenter(childId);
           return `<path class="connection-path group-connection-path" d="${buildSmoothPath([fromPoint, toPoint])}"></path>`;
         }))
         .join("")
     : "";
 
-  dom.connectionsLayer.innerHTML = noteFragments + groupFragments;
+  const connectionsMarkup = noteFragments + groupFragments;
+  if (connectionsMarkup !== lastConnectionsMarkup) {
+    dom.connectionsLayer.innerHTML = connectionsMarkup;
+    lastConnectionsMarkup = connectionsMarkup;
+  }
 }
 
 function isRenderedCardVisible(cardId) {
@@ -4527,12 +4664,12 @@ function isRenderedCardVisible(cardId) {
   return renderedScale >= 0.72;
 }
 
-function getRenderedCardScreenCenter(cardId) {
-  if (uiState.groupAnimation) {
+function getRenderedCardScreenCenter(cardId, cachedViewportRect = null) {
+  if (uiState.groupAnimation || uiState.parentGroupAnimation) {
     const element = cardElements.get(cardId);
     if (element) {
       const cardRect = element.getBoundingClientRect();
-      const viewportRect = dom.viewport.getBoundingClientRect();
+      const viewportRect = cachedViewportRect || dom.viewport.getBoundingClientRect();
       return {
         x: cardRect.left - viewportRect.left + cardRect.width / 2,
         y: cardRect.top - viewportRect.top + cardRect.height / 2
